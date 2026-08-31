@@ -342,4 +342,4 @@ microscript/ILibDuktape_Commit.h
 /meshagent_*
 /DEBUG_meshagent_*
 
-./dist
+/dist
