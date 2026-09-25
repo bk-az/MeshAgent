@@ -346,3 +346,4 @@ microscript/ILibDuktape_Commit.h
 /DEBUG_meshagent_*
 
 /dist
+/build-out
