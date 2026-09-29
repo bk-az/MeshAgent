@@ -196,6 +196,7 @@ list, including `Tag`, `InstallFlags`, `displayName`, `companyName`, etc.):
 | `MeshID` | Hex-encoded device-group ID, `0x`-prefixed |
 | `ServerID` | Hex-encoded hash of the server's agent certificate |
 | `MeshServer` | `wss://` URL the agent connects to (or `local` for LAN-only) |
+| `displayName` | Name shown in the agent's own dialogs (remote-session consent prompt, notifications). This fork defaults to `AssetSonar` when the key is absent; upstream defaults to `MeshCentral`. |
 
 ## 7. Generate the per-tenant provisioning script
 

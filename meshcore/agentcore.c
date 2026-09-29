@@ -5224,7 +5224,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 	}
 	else
 	{
-		agentHost->displayName = "MeshCentral";
+		agentHost->displayName = "AssetSonar";
 	}
 
 	duk_push_sprintf(tmpCtx, "require('service-manager').manager.getService('%s').isMe();", agentHost->meshServiceName);
