@@ -34,6 +34,9 @@ limitations under the License.
 #include <openssl/rand.h>
 #include <openssl/err.h>
 #include <openssl/hmac.h>
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+#include <openssl/provider.h>
+#endif
 #if defined(_POSIX) || defined(__APPLE__)
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -482,7 +485,11 @@ void __fastcall util_openssl_init()
 	OpenSSL_add_all_ciphers();		// OpenSSL 1.1
 	OpenSSL_add_all_digests();		// OpenSSL 1.1
 #ifdef FIPSMODE
-	if (FIPS_mode() || FIPS_mode_set(1)) 
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+	if (EVP_default_properties_is_fips_enabled(NULL) || EVP_default_properties_enable_fips(NULL, 1))
+#else
+	if (FIPS_mode() || FIPS_mode_set(1))
+#endif
 	{
 		printf("ENTERED FIPS mode\n"); 
 	}
@@ -1087,6 +1094,21 @@ int __fastcall util_from_p12(char* data, int datalen, char* password, struct uti
 	cert->pkey = NULL;
 	p12 = d2i_PKCS12(&p12, (const unsigned char**)&data, datalen);
 	r = PKCS12_parse(p12, password, &(cert->pkey), &(cert->x509), NULL);
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+	if (r == 0 && p12 != NULL)
+	{
+		// PKCS#12 blobs written by OpenSSL 1.1.x default to RC2-40 for the certificate bag. OpenSSL 3.x+ only
+		// implements RC2 in the "legacy" provider, so load it on demand (once) and retry, otherwise an upgraded
+		// agent would fail to read its stored certificates and generate a brand new identity.
+		static OSSL_PROVIDER *legacyProvider = NULL;
+		if (legacyProvider == NULL) { legacyProvider = OSSL_PROVIDER_load(NULL, "legacy"); }
+		if (legacyProvider != NULL)
+		{
+			ERR_clear_error();
+			r = PKCS12_parse(p12, password, &(cert->pkey), &(cert->x509), NULL);
+		}
+	}
+#endif
 	PKCS12_free(p12);
 	return r;
 }
@@ -1120,7 +1142,9 @@ int __fastcall util_mkCertEx(struct util_cert *rootcert, struct util_cert* cert,
 	char nameStr[(UTIL_SHA384_HASHSIZE * 2) + 2];
 	BIGNUM *oBigNbr;
 
-	CRYPTO_mem_ctrl(CRYPTO_MEM_CHECK_ON);
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
+	CRYPTO_mem_ctrl(CRYPTO_MEM_CHECK_ON); // No-op since OpenSSL 3.0 (memory debugging was removed)
+#endif
 
 	if (initialcert != NULL)
 	{
@@ -1161,7 +1185,11 @@ int __fastcall util_mkCertEx(struct util_cert *rootcert, struct util_cert* cert,
 	X509_set_pubkey(x, pk);
 
 	// Set the subject name
+#if OPENSSL_VERSION_NUMBER >= 0x40000000L
+	cname = X509_NAME_new(); // X509_get_subject_name() returns a const pointer since OpenSSL 4.0, so build the name and set it below
+#else
 	cname = X509_get_subject_name(x);
+#endif
 
 	if (name == NULL)
 	{
@@ -1177,6 +1205,11 @@ int __fastcall util_mkCertEx(struct util_cert *rootcert, struct util_cert* cert,
 		// This function creates and adds the entry, working out the correct string type and performing checks on its length. Normally we'd check the return value for errors...
 		X509_NAME_add_entry_by_txt(cname, "CN", MBSTRING_ASC, (unsigned char*)name, -1, -1, 0);
 	}
+#if OPENSSL_VERSION_NUMBER >= 0x40000000L
+	X509_set_subject_name(x, cname);
+	X509_NAME_free(cname);
+	cname = (X509_NAME*)X509_get_subject_name(x);
+#endif
 
 	if (rootcert == NULL)
 	{
@@ -1195,7 +1228,7 @@ int __fastcall util_mkCertEx(struct util_cert *rootcert, struct util_cert* cert,
 	else
 	{
 		// This is a sub-certificate
-		cname = X509_get_subject_name(rootcert->x509);
+		cname = (X509_NAME*)X509_get_subject_name(rootcert->x509); // const since OpenSSL 4.0, only read from here
 		X509_set_issuer_name(x, cname);
 
 		// Add usual cert stuff
