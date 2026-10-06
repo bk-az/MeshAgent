@@ -70,6 +70,8 @@
  *                          (equivalent to signing separately with productsign
  *                          afterwards; use whichever fits your pipeline)
  *   --keep-work            Don't delete the intermediate build/ directory
+ *   --skip-signature-check Skip the code-signature preflight (local experiments
+ *                          only; a release build must never need this)
  *
  * Per-tenant provisioning script (separate mode -- no binary, no signing):
  *   node build-macos-pkg.js --emit-provision-script <tenant.msh> \
@@ -118,6 +120,75 @@ function pkgIdentifierSegment(str) {
 // macOS filename) and only strips characters a filesystem/path can't hold.
 function pkgFileNameSegment(str) {
     return String(str).replace(/[\/:\\]/g, '-').replace(/\s+/g, ' ').trim() || 'MeshAgent';
+}
+
+// Runs codesign the way tccd does and refuses a binary that will fail TCC.
+//
+// TCC (Screen Recording, Accessibility, Full Disk Access) stores the binary's
+// designated requirement -- `identifier "<id>" and anchor apple generic ...` --
+// and evaluates it against the file on disk every time the agent asks for
+// access. For a universal binary that evaluation is applied to EVERY slice.
+// Two thin binaries signed without --identifier get their filenames as
+// identifiers (meshagent_osx-arm-64 / meshagent_osx-x86-64); lipo'd together,
+// the slice with the other identifier makes the whole check fail (-67050), so
+// every stored grant is treated as unknown: the desktop session shows only the
+// wallpaper with no mouse/keyboard, and the Full Disk Access toggle turns
+// itself off. `codesign --verify` passes anyway (it checks each slice against
+// its own requirement), which is why this check exists. Sign both thin
+// binaries with the same --identifier before lipo, then rerun.
+async function verifyAgentSignature(agentPath) {
+    const run = async function (cmd, args) {
+        try { const r = await execFileP(cmd, args); return { ok: true, out: (r.stdout || '') + (r.stderr || '') }; }
+        catch (e) { return { ok: false, out: (e.stdout || '') + (e.stderr || '') + (e.message || '') }; }
+    };
+    const lipo = await run('lipo', ['-archs', agentPath]);
+    if (!lipo.ok) { throw new Error('Not a Mach-O binary (lipo -archs failed): ' + agentPath + '\n' + lipo.out.trim()); }
+    const archs = lipo.out.trim().split(/\s+/).filter(Boolean);
+
+    const slices = {};
+    for (const arch of archs) {
+        const d = await run('codesign', ['-dvvv', '-a', arch, agentPath]);
+        const id = (d.out.match(/^Identifier=(.*)$/m) || [])[1];
+        if (!id) {
+            throw new Error('The ' + arch + ' slice of ' + agentPath + ' is not code-signed. Sign both thin binaries with\n'
+                + '  codesign --sign "Developer ID Application: ..." --identifier <same-id> --options runtime --timestamp <file>\n'
+                + 'before running lipo (see README step 2).');
+        }
+        slices[arch] = {
+            identifier: id.trim(),
+            team: ((d.out.match(/^TeamIdentifier=(.*)$/m) || [])[1] || '').trim(),
+            adhoc: /^Signature=adhoc$/m.test(d.out) || /^CodeDirectory .*\badhoc\b/m.test(d.out)
+        };
+    }
+
+    const identifiers = Array.from(new Set(archs.map(function (a) { return slices[a].identifier; })));
+    if (identifiers.length > 1) {
+        throw new Error('REFUSING TO PACKAGE ' + agentPath + ': the slices carry different code-signing identifiers:\n'
+            + archs.map(function (a) { return '  ' + a + ': ' + slices[a].identifier; }).join('\n') + '\n'
+            + 'TCC evaluates the stored requirement against every slice, so this binary will be denied Screen\n'
+            + 'Recording / Accessibility and lose Full Disk Access on every Mac. Re-sign both thin binaries with\n'
+            + 'the SAME --identifier (e.g. com.assetsonar.sonarsight.agent), lipo again, then rerun.');
+    }
+    const warnings = [];
+    if (archs.some(function (a) { return slices[a].adhoc; })) {
+        warnings.push('agent binary is ad-hoc signed; TCC grants will be keyed to this exact build and reset on every update. Sign with a Developer ID for anything you ship.');
+    }
+
+    // Mirror tccd exactly: the whole file must satisfy one slice's designated
+    // requirement without forcing an architecture.
+    const req = await run('codesign', ['-d', '-r-', '-a', archs[0], agentPath]);
+    const dr = (req.out.match(/^designated => (.*)$/m) || [])[1];
+    if (dr) {
+        const check = await run('codesign', ['-v', '-R=' + dr.trim(), agentPath]);
+        if (!check.ok) {
+            throw new Error('REFUSING TO PACKAGE ' + agentPath + ': the file does not satisfy its own designated requirement\n'
+                + '  ' + dr.trim() + '\n'
+                + 'when evaluated across all slices (this is the check tccd performs):\n'
+                + '  ' + check.out.trim().split('\n').pop() + '\n'
+                + 'Re-sign both thin binaries with the same --identifier and lipo again.');
+        }
+    }
+    return { archs: archs, identifier: identifiers[0], team: slices[archs[0]].team, adhoc: slices[archs[0]].adhoc, warnings: warnings };
 }
 
 // The payload never contains "<executableName>.msh". This script MUST NOT
@@ -519,7 +590,8 @@ function buildLaunchAgentPlist(companyName, serviceName, executableName) {
  * @param {string} [opts.backgroundPath] Optional PNG for the installer sidebar
  * @param {string} [opts.signIdentity]   "Developer ID Installer: ..." -- passed to productbuild --sign
  * @param {boolean} [opts.keepWork]      Don't delete the intermediate build/ dir
- * @returns {Promise<{pkgPath: string, uninstallPath: string, workDir: string}>}
+ * @param {boolean} [opts.skipSignatureCheck] Skip verifyAgentSignature (local experiments only)
+ * @returns {Promise<{pkgPath: string, uninstallPath: string, workDir: string, signature: object|null}>}
  */
 async function buildMacOSInstaller(opts) {
     if (process.platform !== 'darwin') { throw new Error('pkgbuild/productbuild only exist on macOS; run this on a Mac.'); }
@@ -540,6 +612,9 @@ async function buildMacOSInstaller(opts) {
     // put a space in the filename, and the .pkg is meant to sit next to a
     // "<exe>.msh" -- deriving both from --exe keeps the pair named alike.
     const pkgFileName = pkgFileNameSegment(opts.pkgName || opts.executableName || 'MeshAgent') + '.pkg';
+
+    // Refuse a binary TCC will reject (mixed slice identifiers); see verifyAgentSignature.
+    const signature = opts.skipSignatureCheck ? null : await verifyAgentSignature(opts.agentPath);
 
     const workDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'meshagent-macos-pkg-'));
     try {
@@ -635,7 +710,7 @@ async function buildMacOSInstaller(opts) {
         const uninstallPath = path.join(opts.outDir, 'Uninstall.command');
         await fsp.writeFile(uninstallPath, buildUninstall(companyName, serviceName, executableName, identifier), { mode: 0o755 });
 
-        return { pkgPath: pkgPath, uninstallPath: uninstallPath, workDir: workDir };
+        return { pkgPath: pkgPath, uninstallPath: uninstallPath, workDir: workDir, signature: signature };
     } finally {
         if (!opts.keepWork) { await fsp.rm(workDir, { recursive: true, force: true }); }
     }
@@ -705,6 +780,7 @@ function parseArgs(argv) {
         else if (a === '--emit-provision-script') { opts.emitProvision = argv[++i]; }
         else if (a === '--script-name') { opts.scriptName = argv[++i]; }
         else if (a === '--keep-work') { opts.keepWork = true; }
+        else if (a === '--skip-signature-check') { opts.skipSignatureCheck = true; }
         else if (a === '--help' || a === '-h') { opts.help = true; }
         else { opts._.push(a); }
     }
@@ -728,6 +804,12 @@ function printHelp() {
         '  --background <path>    Optional PNG for the installer sidebar',
         '  --sign <identity>      "Developer ID Installer: Your Org (TEAMID)"',
         '  --keep-work             Keep the intermediate build/ directory (debugging)',
+        '  --skip-signature-check  Skip the code-signature preflight (never for a release)',
+        '',
+        'Preflight: the agent binary must be signed, and for a universal binary every',
+        'slice must carry the SAME code-signing identifier (sign the thin binaries with',
+        '--identifier <id> before lipo). Mixed identifiers make TCC deny Screen Recording',
+        'and Accessibility and drop Full Disk Access on every Mac, so the build is refused.',
         '',
         'Per-tenant provisioning script (no agent binary or signing needed):',
         '  node build-macos-pkg.js --emit-provision-script <tenant.msh> [options]',
@@ -790,8 +872,19 @@ async function main() {
         backgroundPath: opts.backgroundPath ? path.resolve(opts.backgroundPath) : undefined,
         identifier: opts.identifier,
         signIdentity: opts.signIdentity,
-        keepWork: opts.keepWork
+        keepWork: opts.keepWork,
+        skipSignatureCheck: opts.skipSignatureCheck
     });
+
+    if (result.signature) {
+        console.log('Agent signature: identifier=' + result.signature.identifier
+            + (result.signature.team ? ' team=' + result.signature.team : '')
+            + ' archs=' + result.signature.archs.join(',')
+            + (result.signature.adhoc ? ' [AD-HOC]' : ''));
+        result.signature.warnings.forEach(function (w) { console.warn('WARNING: ' + w); });
+    } else {
+        console.warn('WARNING: signature preflight skipped (--skip-signature-check).');
+    }
 
     const stat = await fsp.stat(result.pkgPath);
     const q = function (p) { return '"' + p.replace(/"/g, '\\"') + '"'; };
@@ -819,4 +912,4 @@ if (require.main === module) {
     main().catch(function (e) { console.error(e.message || e); process.exit(1); });
 }
 
-module.exports = { buildMacOSInstaller: buildMacOSInstaller, buildProvisionScriptFile: buildProvisionScriptFile };
+module.exports = { buildMacOSInstaller: buildMacOSInstaller, buildProvisionScriptFile: buildProvisionScriptFile, verifyAgentSignature: verifyAgentSignature };

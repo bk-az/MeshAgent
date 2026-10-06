@@ -76,15 +76,29 @@ make -j4 macos ARCHID=16                 # x86_64 -> meshagent_osx-x86-64
 
 ## 2. Sign each binary
 
+Always pass the **same `--identifier`** to both. Without it, codesign derives
+the identifier from the filename (`meshagent_osx-arm-64` vs
+`meshagent_osx-x86-64`), and a universal binary assembled from those two
+slices fails every TCC check: tccd evaluates the stored requirement
+(`identifier "..." and anchor apple generic ...`) against **every slice** of
+the file, so the slice with the other identifier makes the whole evaluation
+fail (`-67050`). Screen Recording is then denied silently (desktop shows only
+the wallpaper, no input) and the Full Disk Access toggle turns itself off.
+`codesign --verify` does not catch this; `build-macos-pkg.js` does.
+
 ```sh
-codesign --sign "Developer ID Application: Your Org (TEAMID)" \
+ID=com.assetsonar.sonarsight.agent
+codesign --sign "Developer ID Application: Your Org (TEAMID)" --identifier "$ID" \
   --options runtime --timestamp meshagent_osx-arm-64
-codesign --sign "Developer ID Application: Your Org (TEAMID)" \
+codesign --sign "Developer ID Application: Your Org (TEAMID)" --identifier "$ID" \
   --options runtime --timestamp meshagent_osx-x86-64
 
-codesign -dv meshagent_osx-arm-64        # verify: TeamIdentifier should be set, not "adhoc"
-codesign -dv meshagent_osx-x86-64
+codesign -dv meshagent_osx-arm-64 2>&1 | grep -E '^Identifier|^TeamIdentifier'   # same Identifier on both; TeamIdentifier set, not "adhoc"
+codesign -dv meshagent_osx-x86-64 2>&1 | grep -E '^Identifier|^TeamIdentifier'
 ```
+
+The identifier is also what a PPPC profile and `tccutil reset` key on, so
+keep it stable across releases.
 
 ## 3. Build a pkg per architecture (no `.msh` baked into either)
 
@@ -287,16 +301,56 @@ Works both from a Terminal and from a deployment tool: it re-execs itself
 under `sudo` only when it isn't already root. It also removes the agent's
 diagnostic service and clears its TCC/privacy grants.
 
+`Uninstall.command` only knows the one company/service/exe triple it was
+built with. For a Mac where the agent was renamed, upgraded over, installed
+by hand, or left stale entries in System Settings, use the pattern-based
+purge script instead:
+
+```sh
+sudo bash packaging/macos/purge-macos-agent.sh --dry-run   # show the plan, change nothing
+sudo bash packaging/macos/purge-macos-agent.sh             # show the plan, then ask to confirm
+sudo bash packaging/macos/purge-macos-agent.sh --yes       # MDM: no confirmation prompt
+```
+
+It discovers every launchd job, process, binary, receipt, firewall rule and
+TCC grant (Full Disk Access, Screen Recording, Accessibility, Input
+Monitoring, ...) matching `meshagent|mesh_services|meshcentral|assetsonar|sonarsight`
+(add more with `--pattern`), prints the complete plan, removes exactly that
+after confirmation, then verifies and exits `0` only when nothing is left.
+
+It touches only the agent. It never resets a privacy pane or Login Items
+for all apps, has no flag that would, refuses a TCC delete if any matched
+row is not the agent's, and validates every user-supplied pattern.
+
+Run it from a terminal app that has Full Disk Access (System Settings >
+Privacy & Security > Full Disk Access > add Terminal, then quit and reopen
+it). `tccutil reset` can only name signed identifiers, so without FDA the
+entries of an ad-hoc-signed or already-deleted binary stay listed and the
+script exits `3` to say so.
+
 ## Appendix: universal binary
 
 A single arm64+x86_64 binary avoids picking the right `.pkg` per Mac, at
 the cost of roughly doubling the shipped size (every Mac only ever runs
 one slice; the other sits on disk unused) and one extra build step:
 
+Sign the two thin binaries first (step 2, same `--identifier` on both), then
+merge without signing again, so each slice stays byte-identical to the thin
+file the server hands out:
+
 ```sh
 lipo -create -output meshagent_universal meshagent_osx-arm-64 meshagent_osx-x86-64
 lipo -info meshagent_universal            # verify: x86_64 arm64
+
+# What tccd will do: the whole file must satisfy one slice's designated
+# requirement without forcing an architecture. Must print
+# "explicit requirement satisfied"; a failure means the identifiers differ.
+DR=$(codesign -d -r- -a arm64 meshagent_universal 2>/dev/null | sed -n 's/^designated => //p')
+codesign -vvv -R="$DR" meshagent_universal
 ```
+
+`build-macos-pkg.js` runs this same check and refuses the binary if it fails
+(`--skip-signature-check` bypasses it for local experiments only).
 
 Sign, package, sign-the-pkg, and notarize it exactly as in steps 2–5
 above, just pointing at `meshagent_universal` instead of the two
