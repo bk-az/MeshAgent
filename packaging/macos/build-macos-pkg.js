@@ -32,8 +32,13 @@
  *     1. an already-installed "<exe>.msh"                    (upgrade/reinstall)
  *     2. "/Library/Application Support/<company>/<exe>.msh"  (staged by an MDM)
  *     3. "<exe>.msh" next to the .pkg being run              (manual install)
+ *   Step 3 only works from a folder the script may read. Since macOS 10.15 an
+ *   installer script is TCC-attributed to the package's signing team, which
+ *   has no access to Downloads, Desktop or Documents, so ship the .pkg and
+ *   its .msh on a disk image: mounted under /Volumes they are readable, and a
+ *   double-click on the package configures and starts the agent.
  *
- *   The normal path is none of those: deploy the package, then run the
+ *   For mass deployment the path is usually none of those: deploy the package, then run the
  *   per-tenant provisioning script this same script can generate with
  *   --emit-provision-script. That script carries the tenant's ".msh" inside
  *   it as base64, writes it, restarts the daemon, verifies the daemon is
@@ -44,6 +49,10 @@
  * release. Per tenant you generate one plain-text script -- no binary, no
  * certificate, no notarization:
  *   <pkgName>.pkg              <- byte-identical, already signed + notarized
+ *   <pkgName>-Uninstall.pkg    <- payload-free package that runs the uninstaller; sign +
+ *                                 notarize it like the agent package, so a double-click
+ *                                 works where Gatekeeper refuses Uninstall.command
+ *   <pkgName>-PPPC.mobileconfig <- privacy profile for that release, deploy via MDM
  *   <exe>-provision.sh         <- that tenant's settings, unsigned, free to generate
  * See MASS-DEPLOYMENT.md in this folder for the per-tool instructions.
  *
@@ -69,9 +78,26 @@
  *                          the product archive directly via productbuild --sign
  *                          (equivalent to signing separately with productsign
  *                          afterwards; use whichever fits your pipeline)
+ *   --organization <name>  PayloadOrganization shown in the PPPC profile
+ *                          (default: --company)
  *   --keep-work            Don't delete the intermediate build/ directory
  *   --skip-signature-check Skip the code-signature preflight (local experiments
- *                          only; a release build must never need this)
+ *                          only; a release build must never need this). Also
+ *                          skips the PPPC profile, which needs the signature.
+ *
+ * Every build also writes "<pkgName>-PPPC.mobileconfig" beside the .pkg: the
+ * Privacy Preferences Policy Control profile an MDM deploys so the agent gets
+ * Accessibility, event posting and Full Disk Access without a user clicking
+ * through System Settings, plus the standard-user Screen Recording toggle and
+ * Background Items approval. It is keyed to the binary's code signature and
+ * install path, which is why it is generated from the same inputs as the .pkg.
+ * Regenerate it alone (no package build) with:
+ *   node build-macos-pkg.js --emit-pppc-profile <path-to-agent-binary> \
+ *     --out dist/ --company <name> --service <name> --exe <name>
+ *
+ * Uninstall package alone (no agent binary; honours the naming flags and --sign):
+ *   node build-macos-pkg.js --emit-uninstall-pkg --out dist/ --company <name> \
+ *     --service <name> --exe <name> --identifier <id> --display-name <name>
  *
  * Per-tenant provisioning script (separate mode -- no binary, no signing):
  *   node build-macos-pkg.js --emit-provision-script <tenant.msh> \
@@ -188,7 +214,16 @@ async function verifyAgentSignature(agentPath) {
                 + 'Re-sign both thin binaries with the same --identifier and lipo again.');
         }
     }
-    return { archs: archs, identifier: identifiers[0], team: slices[archs[0]].team, adhoc: slices[archs[0]].adhoc, warnings: warnings };
+    return {
+        archs: archs,
+        identifier: identifiers[0],
+        team: slices[archs[0]].team,
+        adhoc: slices[archs[0]].adhoc,
+        // Verbatim `designated => ...` clause. This is the string a PPPC profile
+        // carries as CodeRequirement, so it is kept exactly as codesign printed it.
+        requirement: dr ? dr.trim() : null,
+        warnings: warnings
+    };
 }
 
 // The payload never contains "<executableName>.msh". This script MUST NOT
@@ -201,6 +236,13 @@ async function verifyAgentSignature(agentPath) {
 //   3. "<exe>.msh" next to the .pkg being run              (manual install)
 // With none of those, the agent installs but is left stopped, to be
 // provisioned later by "<exe>-provision.sh". Exit status is 0 either way.
+//
+// Step 3 reads from the folder Installer reports in $1. Since macOS 10.15 the
+// script runs TCC-attributed to the package's signing team ("Hosted team
+// responsibility" in install.log), which has no Files-and-Folders grant, so a
+// sibling .msh in Downloads, Desktop or Documents fails with "Operation not
+// permitted" and the cp below fails silently. Shipping the pair on a disk
+// image avoids that: /Volumes is not a protected location.
 function buildPostinstall(companyName, serviceName, executableName) {
     return `#!/bin/bash
 # Tenant-agnostic postinstall. Never fails for a missing configuration.
@@ -572,6 +614,261 @@ function buildLaunchAgentPlist(companyName, serviceName, executableName) {
 `;
 }
 
+
+// ---------------------------------------------------------------------------
+// PPPC (Privacy Preferences Policy Control) configuration profile
+// ---------------------------------------------------------------------------
+//
+// The .pkg cannot grant Screen Recording, Accessibility or Full Disk Access.
+// Those are TCC decisions, and the only way to pre-approve them on a managed
+// Mac is a PPPC payload delivered by a user-approved MDM; the same profile
+// installed by double-clicking or "profiles install" is accepted but its TCC
+// payload is ignored. The payload identifies the agent by its installed path
+// plus the designated requirement of its code signature, so it only matches a
+// binary that is (a) at /usr/local/mesh_services/<company>/<service>/<exe> and
+// (b) signed with the same identifier and Team ID. That is why it is emitted
+// here, next to the .pkg, from the very binary that went into the package:
+// change --company/--service/--exe or re-sign with a different identifier and
+// the profile must be regenerated.
+//
+// Service entries:
+//   Accessibility         Allow   remote mouse/keyboard control
+//   PostEvent             Allow   synthesized CGEvents (clicks, keystrokes)
+//   SystemPolicyAllFiles  Allow   Full Disk Access (file manager / terminal
+//                                 into TCC-protected locations, even as root)
+//   ScreenCapture         AllowStandardUserToSetSystemService
+//                                 Apple does not let a profile grant Screen
+//                                 Recording. This is the most it can do: a
+//                                 non-admin user can flip the toggle in System
+//                                 Settings without an administrator password.
+//
+// A second payload (com.apple.servicemanagement, macOS 13+) pre-approves the
+// agent's launchd jobs as Background Items so users never see the "Background
+// Items Added" notification. It keys on the Team ID, so it is only emitted for
+// a Developer ID signed binary.
+//
+// UUIDs are derived from the identifiers rather than random, so rebuilding
+// with the same inputs yields a byte-identical file: MDMs treat a changed
+// PayloadUUID as a new profile, and a stable file is diff-able in review.
+function stableUuid(seed) {
+    const h = require('crypto').createHash('sha1').update(seed).digest('hex');
+    // RFC 4122 layout (version 5 nibble + variant bits) so strict parsers accept it.
+    const variant = ((parseInt(h.slice(16, 18), 16) & 0x3f) | 0x80).toString(16);
+    return (h.slice(0, 8) + '-' + h.slice(8, 12) + '-5' + h.slice(13, 16) + '-' + variant + h.slice(18, 20) + '-' + h.slice(20, 32)).toUpperCase();
+}
+
+function plistString(indent, key, value) {
+    return indent + '<key>' + xmlEscape(key) + '</key>\n' + indent + '<string>' + xmlEscape(value) + '</string>\n';
+}
+
+/**
+ * Renders the PPPC .mobileconfig for one build of the agent.
+ *
+ * @param {object} p
+ * @param {string} p.companyName      Install path component, must match the .pkg
+ * @param {string} p.serviceName      launchd label / dir name, must match the .pkg
+ * @param {string} p.executableName   Installed executable name, must match the .pkg
+ * @param {string} p.displayName      Human-facing product name for payload titles
+ * @param {string} p.identifier       Package identifier; the profile is "<identifier>.privacy"
+ * @param {string} [p.organization]   PayloadOrganization (default: companyName)
+ * @param {object} p.signature        Result of verifyAgentSignature()
+ * @returns {string} plist XML
+ */
+function buildPrivacyProfile(p) {
+    if (!p.signature || !p.signature.requirement) {
+        throw new Error('Cannot build a PPPC profile: codesign printed no designated requirement for the agent binary.');
+    }
+    const installedPath = '/usr/local/mesh_services/' + p.companyName + '/' + p.serviceName + '/' + p.executableName;
+    const organization = p.organization || p.companyName;
+    const profileId = p.identifier + '.privacy';
+    const tccId = profileId + '.tcc';
+    const bgId = profileId + '.background-items';
+
+    const entry = function (authorization, comment) {
+        return '          <dict>\n'
+            + plistString('            ', 'Identifier', installedPath)
+            + plistString('            ', 'IdentifierType', 'path')
+            + plistString('            ', 'CodeRequirement', p.signature.requirement)
+            + plistString('            ', 'Authorization', authorization)
+            + plistString('            ', 'Comment', comment)
+            + '          </dict>\n';
+    };
+    const service = function (name, authorization, comment) {
+        return '        <key>' + name + '</key>\n        <array>\n' + entry(authorization, comment) + '        </array>\n';
+    };
+
+    let payloads = '    <dict>\n'
+        + plistString('      ', 'PayloadType', 'com.apple.TCC.configuration-profile-policy')
+        + plistString('      ', 'PayloadIdentifier', tccId)
+        + plistString('      ', 'PayloadUUID', stableUuid(tccId))
+        + '      <key>PayloadVersion</key>\n      <integer>1</integer>\n'
+        + plistString('      ', 'PayloadDisplayName', p.displayName + ' Privacy Preferences')
+        + plistString('      ', 'PayloadDescription', 'Pre-approves Accessibility, event posting and Full Disk Access for ' + p.displayName
+            + ' and lets a standard user enable Screen Recording for it.')
+        + plistString('      ', 'PayloadOrganization', organization)
+        + '      <key>Services</key>\n      <dict>\n'
+        + service('Accessibility', 'Allow', p.displayName + ': remote mouse and keyboard control')
+        + service('PostEvent', 'Allow', p.displayName + ': synthesized keyboard and mouse events')
+        + service('SystemPolicyAllFiles', 'Allow', p.displayName + ': Full Disk Access for remote file management')
+        + service('ScreenCapture', 'AllowStandardUserToSetSystemService', p.displayName
+            + ': macOS does not allow a profile to grant Screen Recording; this lets a standard user enable it without an administrator password')
+        + '      </dict>\n'
+        + '    </dict>\n';
+
+    if (p.signature.team && !p.signature.adhoc) {
+        payloads += '    <dict>\n'
+            + plistString('      ', 'PayloadType', 'com.apple.servicemanagement')
+            + plistString('      ', 'PayloadIdentifier', bgId)
+            + plistString('      ', 'PayloadUUID', stableUuid(bgId))
+            + '      <key>PayloadVersion</key>\n      <integer>1</integer>\n'
+            + plistString('      ', 'PayloadDisplayName', p.displayName + ' Background Items')
+            + plistString('      ', 'PayloadDescription', 'Approves the ' + p.displayName + ' launchd jobs so the "Background Items Added" notification is not shown.')
+            + plistString('      ', 'PayloadOrganization', organization)
+            + '      <key>Rules</key>\n      <array>\n'
+            + '        <dict>\n'
+            + plistString('          ', 'RuleType', 'LabelPrefix')
+            + plistString('          ', 'RuleValue', p.serviceName)
+            + plistString('          ', 'TeamIdentifier', p.signature.team)
+            + plistString('          ', 'Comment', '/Library/LaunchDaemons/' + p.serviceName + '.plist and /Library/LaunchAgents/' + p.serviceName + '-launchagent.plist')
+            + '        </dict>\n'
+            + '      </array>\n'
+            + '    </dict>\n';
+    }
+
+    return '<?xml version="1.0" encoding="UTF-8"?>\n'
+        + '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+        + '<plist version="1.0">\n'
+        + '<dict>\n'
+        + '  <key>PayloadContent</key>\n  <array>\n'
+        + payloads
+        + '  </array>\n'
+        + plistString('  ', 'PayloadDescription', 'Privacy permissions for ' + p.displayName + ' (' + installedPath + '). '
+            + 'Must be delivered by MDM: a PPPC payload is ignored when the profile is installed by hand. '
+            + 'Keyed to code signature ' + p.signature.identifier + (p.signature.team ? ' / team ' + p.signature.team : ' (ad-hoc)') + '.')
+        + plistString('  ', 'PayloadDisplayName', p.displayName + ' Privacy Permissions')
+        + plistString('  ', 'PayloadIdentifier', profileId)
+        + plistString('  ', 'PayloadOrganization', organization)
+        + '  <key>PayloadRemovalDisallowed</key>\n  <false/>\n'
+        + plistString('  ', 'PayloadScope', 'System')
+        + plistString('  ', 'PayloadType', 'Configuration')
+        + plistString('  ', 'PayloadUUID', stableUuid(profileId))
+        + '  <key>PayloadVersion</key>\n  <integer>1</integer>\n'
+        + '</dict>\n'
+        + '</plist>\n';
+}
+
+// Writes "<baseName>-PPPC.mobileconfig" into outDir and lints it with plutil.
+async function writePrivacyProfile(outDir, baseName, params) {
+    await fsp.mkdir(outDir, { recursive: true });
+    const profilePath = path.join(outDir, pkgFileNameSegment(baseName) + '-PPPC.mobileconfig');
+    await fsp.writeFile(profilePath, buildPrivacyProfile(params));
+    try { await execFileP('plutil', ['-lint', profilePath]); }
+    catch (e) { throw new Error('Generated profile is not a valid plist: ' + profilePath + '\n' + ((e.stdout || '') + (e.stderr || '')).trim()); }
+    return profilePath;
+}
+
+// Wraps one component package into a product archive: the flat .pkg a user
+// double-clicks, with the title, welcome text and optional background that
+// Installer shows. Signed in place when an identity is given.
+async function buildProductArchive(p) {
+    const distributionPath = path.join(p.workDir, 'Distribution.xml');
+    const distribution = '<?xml version="1.0" encoding="utf-8"?>\n'
+        + '<installer-script minSpecVersion="1.000000">\n'
+        + '    <title>' + xmlEscape(p.title) + '</title>\n'
+        + '    <options customize="always" allow-external-scripts="no" rootVolumeOnly="true"/>\n'
+        + (p.backgroundFileName ? '    <background file="' + xmlEscape(p.backgroundFileName) + '" alignment="topleft" scaling="tofit"/>\n' : '')
+        + '    <welcome file="welcome.txt" mime-type="text/plain"/>\n'
+        + '    <choices-outline>\n'
+        + '        <line choice="' + xmlEscape(p.identifier) + '"/>\n'
+        + '    </choices-outline>\n'
+        + '    <choice id="' + xmlEscape(p.identifier) + '" title="' + xmlEscape(p.title) + '" visible="false">\n'
+        + '        <pkg-ref id="' + xmlEscape(p.identifier) + '"/>\n'
+        + '    </choice>\n'
+        + '    <pkg-ref id="' + xmlEscape(p.identifier) + '" version="' + xmlEscape(p.version) + '" onConclusion="none">' + path.basename(p.componentPkg) + '</pkg-ref>\n'
+        + '    <options hostArchitectures="arm64,x86_64"/>\n'
+        + '</installer-script>\n';
+    await fsp.writeFile(distributionPath, distribution);
+    await fsp.writeFile(path.join(p.resourcesDir, 'welcome.txt'), p.welcomeText);
+
+    const args = ['--distribution', distributionPath, '--resources', p.resourcesDir, '--package-path', path.dirname(p.componentPkg)];
+    if (p.signIdentity) { args.push('--sign', p.signIdentity); }
+    args.push(p.outPath);
+    await execFileP('productbuild', args);
+    return p.outPath;
+}
+
+// The uninstaller as a payload-free package whose postinstall is the same
+// script Uninstall.command carries. A bare .command cannot be signed in any
+// way Gatekeeper accepts, so on macOS 15+ a double-click on it ends in "Apple
+// could not verify"; a signed and notarized package opens in Installer, asks
+// for the administrator password and runs the script as root. Its receipt
+// identifier is "<identifier>.uninstall", so it never collides with the
+// agent's own receipt, which the script forgets.
+async function buildUninstallPackage(p) {
+    const scriptsDir = path.join(p.workDir, 'scripts');
+    const resourcesDir = path.join(p.workDir, 'resources');
+    await fsp.mkdir(scriptsDir, { recursive: true });
+    await fsp.mkdir(resourcesDir, { recursive: true });
+    await fsp.writeFile(path.join(scriptsDir, 'postinstall'), buildUninstall(p.companyName, p.serviceName, p.executableName, p.identifier), { mode: 0o755 });
+
+    const componentPkg = path.join(p.workDir, 'uninstall-component.pkg');
+    await execFileP('pkgbuild', [
+        '--nopayload',
+        '--scripts', scriptsDir,
+        '--identifier', p.identifier + '.uninstall',
+        '--version', p.version,
+        componentPkg
+    ]);
+
+    let backgroundFileName = null;
+    if (p.backgroundPath) {
+        backgroundFileName = 'background' + path.extname(p.backgroundPath);
+        await fsp.copyFile(p.backgroundPath, path.join(resourcesDir, backgroundFileName));
+    }
+    const welcomeText = 'Uninstall ' + p.displayName + '\n\n'
+        + 'This removes ' + p.displayName + ' from this Mac: it stops the agent, deletes its\n'
+        + 'files and settings, clears the privacy permissions it was granted and\n'
+        + 'removes its launch items. Nothing is installed.\n\n'
+        + 'Installer asks for an administrator password because the agent runs as a\n'
+        + 'system service. Click Install to proceed with the removal.\n';
+    return buildProductArchive({
+        workDir: p.workDir, componentPkg: componentPkg, resourcesDir: resourcesDir,
+        title: 'Uninstall ' + p.displayName, welcomeText: welcomeText, backgroundFileName: backgroundFileName,
+        identifier: p.identifier + '.uninstall', version: p.version, signIdentity: p.signIdentity, outPath: p.outPath
+    });
+}
+
+/**
+ * Builds only "<pkgName>-Uninstall.pkg", without an agent binary. The naming
+ * options must match the agent package, since the script removes by path.
+ *
+ * @param {object} opts  Same naming options as buildMacOSInstaller, plus
+ *                       outDir, and optionally version, backgroundPath, signIdentity
+ * @returns {Promise<{uninstallPkgPath: string}>}
+ */
+async function buildUninstallPackageFile(opts) {
+    if (process.platform !== 'darwin') { throw new Error('pkgbuild/productbuild only exist on macOS; run this on a Mac.'); }
+    const companyName = opts.companyName || 'meshagent';
+    const serviceName = opts.serviceName || 'meshagent';
+    const executableName = opts.executableName || 'meshagent';
+    const identifier = opts.identifier
+        || ('com.' + pkgIdentifierSegment(companyName) + '.' + pkgIdentifierSegment(serviceName));
+    const pkgBase = pkgFileNameSegment(opts.pkgName || opts.executableName || 'MeshAgent');
+    const workDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'meshagent-macos-uninstall-'));
+    try {
+        await fsp.mkdir(opts.outDir, { recursive: true });
+        const uninstallPkgPath = await buildUninstallPackage({
+            workDir: workDir, outPath: path.join(opts.outDir, pkgBase + '-Uninstall.pkg'),
+            companyName: companyName, serviceName: serviceName, executableName: executableName,
+            displayName: opts.displayName || 'Mesh Agent', identifier: identifier, version: opts.version || '1.0',
+            backgroundPath: opts.backgroundPath, signIdentity: opts.signIdentity
+        });
+        return { uninstallPkgPath: uninstallPkgPath };
+    } finally {
+        if (!opts.keepWork) { await fsp.rm(workDir, { recursive: true, force: true }); }
+    }
+}
+
 /**
  * Builds a generic (no .msh baked in) macOS installer package via the
  * native `pkgbuild` + `productbuild` toolchain.
@@ -589,9 +886,11 @@ function buildLaunchAgentPlist(companyName, serviceName, executableName) {
  * @param {string} [opts.version]        Default: "1.0"
  * @param {string} [opts.backgroundPath] Optional PNG for the installer sidebar
  * @param {string} [opts.signIdentity]   "Developer ID Installer: ..." -- passed to productbuild --sign
+ * @param {string} [opts.organization]   PayloadOrganization in the PPPC profile (default: companyName)
  * @param {boolean} [opts.keepWork]      Don't delete the intermediate build/ dir
- * @param {boolean} [opts.skipSignatureCheck] Skip verifyAgentSignature (local experiments only)
- * @returns {Promise<{pkgPath: string, uninstallPath: string, workDir: string, signature: object|null}>}
+ * @param {boolean} [opts.skipSignatureCheck] Skip verifyAgentSignature (local experiments only;
+ *                                       also skips the PPPC profile, which needs the signature)
+ * @returns {Promise<{pkgPath: string, uninstallPath: string, uninstallPkgPath: string, profilePath: string|null, workDir: string, signature: object|null}>}
  */
 async function buildMacOSInstaller(opts) {
     if (process.platform !== 'darwin') { throw new Error('pkgbuild/productbuild only exist on macOS; run this on a Mac.'); }
@@ -653,12 +952,13 @@ async function buildMacOSInstaller(opts) {
             + '  1. One already installed on this Mac -- an existing configuration is\n'
             + '     kept as-is, so upgrading does not disturb it\n'
             + '  2. /Library/Application Support/' + companyName + '/' + executableName + '.msh\n'
-            + '  3. "' + executableName + '.msh" placed next to this installer package\n\n'
+            + '  3. "' + executableName + '.msh" next to this package, as on the disk image it\n'
+            + '     was downloaded on (a copy in Downloads, Desktop or Documents is out\n'
+            + '     of reach: macOS keeps installers out of those folders)\n\n'
             + 'If none is found, the agent is installed but deliberately left stopped\n'
             + 'and installation still succeeds. An administrator can configure it\n'
             + 'afterwards by running "' + executableName + '-provision.sh" as root.\n\n'
             + 'This software is provided under Apache 2.0 license.\n';
-        await fsp.writeFile(path.join(resourcesDir, 'welcome.txt'), welcomeText);
         let backgroundFileName = null;
         if (opts.backgroundPath) {
             backgroundFileName = 'background' + path.extname(opts.backgroundPath);
@@ -678,39 +978,33 @@ async function buildMacOSInstaller(opts) {
 
         // 2) productbuild: wrap the component package into a distributable
         //    product archive (adds the welcome screen / background / title).
-        const distributionPath = path.join(workDir, 'Distribution.xml');
-        const distribution = '<?xml version="1.0" encoding="utf-8"?>\n'
-            + '<installer-script minSpecVersion="1.000000">\n'
-            + '    <title>' + xmlEscape(displayName) + '</title>\n'
-            + '    <options customize="always" allow-external-scripts="no" rootVolumeOnly="true"/>\n'
-            + (backgroundFileName ? '    <background file="' + xmlEscape(backgroundFileName) + '" alignment="topleft" scaling="tofit"/>\n' : '')
-            + '    <welcome file="welcome.txt" mime-type="text/plain"/>\n'
-            + '    <choices-outline>\n'
-            + '        <line choice="' + xmlEscape(identifier) + '"/>\n'
-            + '    </choices-outline>\n'
-            + '    <choice id="' + xmlEscape(identifier) + '" title="' + xmlEscape(displayName) + '" visible="false">\n'
-            + '        <pkg-ref id="' + xmlEscape(identifier) + '"/>\n'
-            + '    </choice>\n'
-            + '    <pkg-ref id="' + xmlEscape(identifier) + '" version="' + xmlEscape(version) + '" onConclusion="none">component.pkg</pkg-ref>\n'
-            + '    <options hostArchitectures="arm64,x86_64"/>\n'
-            + '</installer-script>\n';
-        await fsp.writeFile(distributionPath, distribution);
-
         await fsp.mkdir(opts.outDir, { recursive: true });
         const pkgPath = path.join(opts.outDir, pkgFileName);
-        const productbuildArgs = [
-            '--distribution', distributionPath,
-            '--resources', resourcesDir,
-            '--package-path', workDir
-        ];
-        if (opts.signIdentity) { productbuildArgs.push('--sign', opts.signIdentity); }
-        productbuildArgs.push(pkgPath);
-        await execFileP('productbuild', productbuildArgs);
+        await buildProductArchive({
+            workDir: workDir, componentPkg: componentPkg, resourcesDir: resourcesDir,
+            title: displayName, welcomeText: welcomeText, backgroundFileName: backgroundFileName,
+            identifier: identifier, version: version, signIdentity: opts.signIdentity, outPath: pkgPath
+        });
 
         const uninstallPath = path.join(opts.outDir, 'Uninstall.command');
         await fsp.writeFile(uninstallPath, buildUninstall(companyName, serviceName, executableName, identifier), { mode: 0o755 });
+        const uninstallPkgPath = await buildUninstallPackage({
+            workDir: path.join(workDir, 'uninstall'), outPath: path.join(opts.outDir, pkgFileName.replace(/\.pkg$/, '-Uninstall.pkg')),
+            companyName: companyName, serviceName: serviceName, executableName: executableName, displayName: displayName,
+            identifier: identifier, version: version, backgroundPath: opts.backgroundPath, signIdentity: opts.signIdentity
+        });
 
-        return { pkgPath: pkgPath, uninstallPath: uninstallPath, workDir: workDir, signature: signature };
+        // The PPPC profile is keyed to this binary's signature and install path,
+        // so it is produced from the same inputs as the .pkg, in the same place.
+        let profilePath = null;
+        if (signature) {
+            profilePath = await writePrivacyProfile(opts.outDir, pkgFileName.replace(/\.pkg$/, ''), {
+                companyName: companyName, serviceName: serviceName, executableName: executableName,
+                displayName: displayName, identifier: identifier, organization: opts.organization, signature: signature
+            });
+        }
+
+        return { pkgPath: pkgPath, uninstallPath: uninstallPath, uninstallPkgPath: uninstallPkgPath, profilePath: profilePath, workDir: workDir, signature: signature };
     } finally {
         if (!opts.keepWork) { await fsp.rm(workDir, { recursive: true, force: true }); }
     }
@@ -763,6 +1057,40 @@ async function buildProvisionScriptFile(opts) {
     return { scriptPath: scriptPath, warnings: warnings };
 }
 
+/**
+ * Writes only the PPPC profile for an already-signed agent binary, without
+ * building a package. Use it when the profile was lost, when a tenant needs it
+ * handed over separately, or to regenerate it after a re-sign. The naming
+ * options MUST match the .pkg the binary shipped in, because the profile keys
+ * on the installed path /usr/local/mesh_services/<company>/<service>/<exe>.
+ *
+ * @param {object} opts
+ * @param {string} opts.agentPath        Signed agent binary (same file the .pkg was built from)
+ * @param {string} opts.outDir           Where to write "<pkgName>-PPPC.mobileconfig"
+ * @param {string} [opts.companyName]    Must match the package (default "meshagent")
+ * @param {string} [opts.serviceName]    Must match the package (default "meshagent")
+ * @param {string} [opts.executableName] Must match the package (default "meshagent")
+ * @param {string} [opts.displayName]    Default "Mesh Agent"
+ * @param {string} [opts.pkgName]        Output basename (default: --exe, else "MeshAgent")
+ * @param {string} [opts.identifier]     Default "com.<company>.<service>"
+ * @param {string} [opts.organization]   PayloadOrganization (default: companyName)
+ * @returns {Promise<{profilePath: string, signature: object}>}
+ */
+async function buildPrivacyProfileFile(opts) {
+    if (process.platform !== 'darwin') { throw new Error('codesign/lipo/plutil only exist on macOS; run this on a Mac.'); }
+    const companyName = opts.companyName || 'meshagent';
+    const serviceName = opts.serviceName || 'meshagent';
+    const executableName = opts.executableName || 'meshagent';
+    const identifier = opts.identifier
+        || ('com.' + pkgIdentifierSegment(companyName) + '.' + pkgIdentifierSegment(serviceName));
+    const signature = await verifyAgentSignature(opts.agentPath);
+    const profilePath = await writePrivacyProfile(opts.outDir, opts.pkgName || opts.executableName || 'MeshAgent', {
+        companyName: companyName, serviceName: serviceName, executableName: executableName,
+        displayName: opts.displayName || 'Mesh Agent', identifier: identifier, organization: opts.organization, signature: signature
+    });
+    return { profilePath: profilePath, signature: signature };
+}
+
 function parseArgs(argv) {
     const opts = { _: [] };
     for (let i = 0; i < argv.length; i++) {
@@ -778,6 +1106,9 @@ function parseArgs(argv) {
         else if (a === '--identifier') { opts.identifier = argv[++i]; }
         else if (a === '--sign') { opts.signIdentity = argv[++i]; }
         else if (a === '--emit-provision-script') { opts.emitProvision = argv[++i]; }
+        else if (a === '--emit-pppc-profile') { opts.emitPppc = argv[++i]; }
+        else if (a === '--emit-uninstall-pkg') { opts.emitUninstallPkg = true; }
+        else if (a === '--organization') { opts.organization = argv[++i]; }
         else if (a === '--script-name') { opts.scriptName = argv[++i]; }
         else if (a === '--keep-work') { opts.keepWork = true; }
         else if (a === '--skip-signature-check') { opts.skipSignatureCheck = true; }
@@ -803,6 +1134,7 @@ function printHelp() {
         '  --identifier <id>      Package id (default: "com.<--company>.<--service>")',
         '  --background <path>    Optional PNG for the installer sidebar',
         '  --sign <identity>      "Developer ID Installer: Your Org (TEAMID)"',
+        '  --organization <name>  PayloadOrganization in the PPPC profile (default: --company)',
         '  --keep-work             Keep the intermediate build/ directory (debugging)',
         '  --skip-signature-check  Skip the code-signature preflight (never for a release)',
         '',
@@ -810,6 +1142,20 @@ function printHelp() {
         'slice must carry the SAME code-signing identifier (sign the thin binaries with',
         '--identifier <id> before lipo). Mixed identifiers make TCC deny Screen Recording',
         'and Accessibility and drop Full Disk Access on every Mac, so the build is refused.',
+        '',
+        'Every build also writes <pkgName>-PPPC.mobileconfig next to the .pkg: the',
+        'Privacy Preferences Policy Control profile (Accessibility, event posting, Full',
+        'Disk Access, standard-user Screen Recording toggle, Background Items) keyed to',
+        'this binary\'s code signature and install path. Deploy it through MDM; it is',
+        'ignored when installed by hand. Regenerate it alone with:',
+        '  node build-macos-pkg.js --emit-pppc-profile <path-to-agent-binary> [options]',
+        '  (honours --out, --company, --service, --exe, --display-name, --pkg-name,',
+        '   --identifier, --organization -- the naming MUST match the .pkg)',
+        '',
+        'Every build also writes <pkgName>-Uninstall.pkg: a payload-free package whose',
+        'postinstall is the uninstaller, for double-click use where Gatekeeper refuses',
+        'Uninstall.command. Sign and notarize it like the agent package. Alone:',
+        '  node build-macos-pkg.js --emit-uninstall-pkg --out <dir> [naming options] [--sign id]',
         '',
         'Per-tenant provisioning script (no agent binary or signing needed):',
         '  node build-macos-pkg.js --emit-provision-script <tenant.msh> [options]',
@@ -821,8 +1167,10 @@ function printHelp() {
         '',
         'The resulting .pkg contains NO tenant .msh and never fails for a missing',
         'one. Deploy the package, then run the provisioning script as root:',
-        '  dist/SonarSightAgent.pkg              <- signed + notarized once per release',
-        '  dist/SonarSightAgent-provision.sh     <- per tenant, plain text, no signing',
+        '  dist/SonarSightAgent.pkg                <- signed + notarized once per release',
+        '  dist/SonarSightAgent-Uninstall.pkg      <- signed + notarized once per release',
+        '  dist/SonarSightAgent-PPPC.mobileconfig  <- per release, deploy via MDM',
+        '  dist/SonarSightAgent-provision.sh       <- per tenant, plain text, no signing',
         'See MASS-DEPLOYMENT.md for Jamf / Kandji / Intune / Mosyle / Munki steps.',
         '',
         'Requires macOS with Xcode Command Line Tools (pkgbuild, productbuild).'
@@ -853,6 +1201,51 @@ async function main() {
         return;
     }
 
+    if (opts.emitUninstallPkg) {
+        const emitted = await buildUninstallPackageFile({
+            outDir: path.resolve(opts.out || opts._[0] || '.'),
+            companyName: opts.companyName,
+            serviceName: opts.serviceName,
+            executableName: opts.executableName,
+            displayName: opts.displayName,
+            pkgName: opts.pkgName,
+            identifier: opts.identifier,
+            version: opts.version,
+            backgroundPath: opts.backgroundPath ? path.resolve(opts.backgroundPath) : undefined,
+            signIdentity: opts.signIdentity,
+            keepWork: opts.keepWork
+        });
+        console.log('Wrote ' + emitted.uninstallPkgPath + (opts.signIdentity ? ' [signed]' : ' [unsigned]'));
+        if (!opts.signIdentity) {
+            console.log('Sign and notarize it like the agent package (productsign, notarytool submit, stapler staple).');
+        }
+        return;
+    }
+
+    if (opts.emitPppc) {
+        const binPath = path.resolve(opts.emitPppc);
+        await fsp.access(binPath).catch(function () { throw new Error('Agent binary not found: ' + binPath); });
+        const emitted = await buildPrivacyProfileFile({
+            agentPath: binPath,
+            outDir: path.resolve(opts.out || opts._[0] || '.'),
+            companyName: opts.companyName,
+            serviceName: opts.serviceName,
+            executableName: opts.executableName,
+            displayName: opts.displayName,
+            pkgName: opts.pkgName,
+            identifier: opts.identifier,
+            organization: opts.organization
+        });
+        emitted.signature.warnings.forEach(function (w) { console.warn('WARNING: ' + w); });
+        console.log('Agent signature: identifier=' + emitted.signature.identifier
+            + (emitted.signature.team ? ' team=' + emitted.signature.team : '')
+            + (emitted.signature.adhoc ? ' [AD-HOC]' : ''));
+        console.log('Wrote ' + emitted.profilePath);
+        console.log('');
+        console.log('Deploy this profile through MDM (Jamf/Kandji/Intune/Mosyle). It is ignored if installed by hand.');
+        return;
+    }
+
     if (opts._.length === 0) { printHelp(); process.exit(1); return; }
 
     const agentPath = path.resolve(opts._[0]);
@@ -872,6 +1265,7 @@ async function main() {
         backgroundPath: opts.backgroundPath ? path.resolve(opts.backgroundPath) : undefined,
         identifier: opts.identifier,
         signIdentity: opts.signIdentity,
+        organization: opts.organization,
         keepWork: opts.keepWork,
         skipSignatureCheck: opts.skipSignatureCheck
     });
@@ -883,7 +1277,7 @@ async function main() {
             + (result.signature.adhoc ? ' [AD-HOC]' : ''));
         result.signature.warnings.forEach(function (w) { console.warn('WARNING: ' + w); });
     } else {
-        console.warn('WARNING: signature preflight skipped (--skip-signature-check).');
+        console.warn('WARNING: signature preflight skipped (--skip-signature-check); no PPPC profile written.');
     }
 
     const stat = await fsp.stat(result.pkgPath);
@@ -891,6 +1285,10 @@ async function main() {
     const signedPath = result.pkgPath.replace(/\.pkg$/, '-signed.pkg');
     console.log('Wrote ' + result.pkgPath + ' (' + stat.size + ' bytes)' + (opts.signIdentity ? ' [signed]' : ' [unsigned]'));
     console.log('Wrote ' + result.uninstallPath);
+    console.log('Wrote ' + result.uninstallPkgPath + (opts.signIdentity ? ' [signed]' : ' [unsigned]') + ' (sign + notarize like the agent package)');
+    if (result.profilePath) {
+        console.log('Wrote ' + result.profilePath + ' (deploy via MDM; grants Accessibility/PostEvent/Full Disk Access, standard-user Screen Recording toggle)');
+    }
     if (!opts.signIdentity) {
         console.log('');
         console.log('This package is UNSIGNED. Next steps:');
@@ -898,6 +1296,7 @@ async function main() {
         console.log('    ' + q(result.pkgPath) + ' ' + q(signedPath));
         console.log('  xcrun notarytool submit ' + q(signedPath) + ' --keychain-profile "AC_PROFILE" --wait');
         console.log('  xcrun stapler staple ' + q(signedPath));
+        console.log('  and the same three steps for ' + q(result.uninstallPkgPath));
     }
     console.log('');
     console.log('This package contains no tenant configuration and will not fail without one.');
@@ -912,4 +1311,11 @@ if (require.main === module) {
     main().catch(function (e) { console.error(e.message || e); process.exit(1); });
 }
 
-module.exports = { buildMacOSInstaller: buildMacOSInstaller, buildProvisionScriptFile: buildProvisionScriptFile, verifyAgentSignature: verifyAgentSignature };
+module.exports = {
+    buildMacOSInstaller: buildMacOSInstaller,
+    buildProvisionScriptFile: buildProvisionScriptFile,
+    buildPrivacyProfile: buildPrivacyProfile,
+    buildPrivacyProfileFile: buildPrivacyProfileFile,
+    buildUninstallPackageFile: buildUninstallPackageFile,
+    verifyAgentSignature: verifyAgentSignature
+};

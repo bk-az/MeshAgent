@@ -1,18 +1,29 @@
 # Deploying the Mac agent to many Macs
 
-A guide for IT administrators. You deploy **two files**:
+A guide for IT administrators. Your download is a disk image holding these
+files; open it and they appear in a Finder window:
 
 | File | What it is | Changes how often? |
 |---|---|---|
 | `<AgentName>.pkg` | The agent. Signed and notarized by us. Contains no customer settings. | Once per release |
-| `<AgentName>-provision.sh` | Your organisation's settings, wrapped in a script. Plain text. | Only if your settings change |
+| `<AgentName>.msh` | Your organisation's settings, as a bare file. Opened from the disk image, the package reads it from beside itself and starts the agent. An MDM that can deliver files but not run scripts stages it at `/Library/Application Support/<CompanyName>/` before the package installs. | Only if your settings change |
+| `<AgentName>-provision.sh` | The same settings, wrapped in a script for tools that run a post-install script. Plain text. | Only if your settings change |
+| `<AgentName>-PPPC.mobileconfig` | Configuration profile that pre-approves the agent's privacy permissions (remote control, Full Disk Access). Deployed through your MDM. | Once per release |
+| `<AgentName>-Uninstall.pkg` | Removes the agent. Signed and notarized, so it can be double-clicked. | Once per release |
+| `Uninstall.command` | The same uninstaller as a script, for deployment tools. | Once per release |
 
-**Install the `.pkg` first, then run the script.** That order matters.
+**The package has to be given its settings** in one of three ways: it is
+opened from the disk image with the `.msh` beside it, the `.msh` was staged
+before it installs, or the script runs after it. Without any of those, the
+package installs the agent but deliberately leaves it stopped, because it does
+not yet know which server to talk to. Installing the package alone never fails
+and never breaks anything — it just waits. The profile can go out before or
+after; see [Screen sharing needs one more thing](#screen-sharing-needs-one-more-thing).
 
-The package on its own installs the agent but deliberately leaves it stopped,
-because it does not yet know which server to talk to. The script supplies that
-and starts it. Installing the package alone never fails and never breaks
-anything — it just waits.
+> Why a disk image: macOS attributes installer scripts to the package's
+> signing team, which has no access to Downloads, Desktop or Documents, so a
+> package copied into one of those folders cannot read a settings file next
+> to it. A mounted image sits under `/Volumes`, which is not protected.
 
 > **Which package do I use?** There is one package per Mac processor type.
 > Run `uname -m` on a target Mac: `arm64` (Apple Silicon) or `x86_64` (Intel).
@@ -113,8 +124,16 @@ if it exits non-zero.
 
 ## Any other tool, or by hand
 
+Installed from the mounted disk image there is nothing to run afterwards —
+the installer reads the `.msh` beside the package and starts the agent:
+
 ```sh
-sudo installer -pkg <AgentName>.pkg -target /
+sudo installer -pkg /Volumes/<VolumeName>/<AgentName>.pkg -target /
+```
+
+If the package was installed from a copy elsewhere, provision it afterwards:
+
+```sh
 sudo bash <AgentName>-provision.sh
 echo "exit code: $?"      # 0 means success
 ```
@@ -122,14 +141,23 @@ echo "exit code: $?"      # 0 means success
 ## MDM with no script support
 
 Some plain MDM "install enterprise application" commands can only send a
-package — they cannot run scripts. Two options:
+package — they cannot run scripts. Stage the settings file instead: have your
+MDM deliver `<AgentName>.msh` from your download to
+`/Library/Application Support/<CompanyName>/<AgentName>.msh`, then install the
+`.pkg`. The package picks it up automatically and starts the agent, no script
+needed.
 
-- **Preferred:** stage the settings file first. Have your MDM deliver your
-  `.msh` to `/Library/Application Support/<CompanyName>/<AgentName>.msh`, then
-  install the `.pkg`. The package picks it up automatically and starts the
-  agent, no script needed.
-- Otherwise, ask us for a small per-organisation settings package, which you
-  deploy alongside the agent package. Either order works.
+If your MDM can only deliver packages, wrap the `.msh` in one of your own and
+deploy that first:
+
+```sh
+mkdir -p "settings/Library/Application Support/<CompanyName>"
+cp <AgentName>.msh "settings/Library/Application Support/<CompanyName>/"
+pkgbuild --root settings --identifier com.example.<agentname>-settings --version 1 <AgentName>-settings.pkg
+```
+
+Should it land after the agent package instead, reinstall the agent package:
+reinstalling keeps an existing configuration and picks up a staged one.
 
 ---
 
@@ -145,22 +173,43 @@ You want to see `state = running` and a `pid`.
 
 ## Screen sharing needs one more thing
 
-macOS blocks screen recording and remote control until it is explicitly
-allowed, and **a script cannot grant this** — only a configuration profile
-from your MDM can.
+macOS blocks remote control and access to protected files until it is
+explicitly allowed, and **a script or package cannot grant this** — only a
+configuration profile delivered by your MDM can. Installing the profile by
+double-clicking it or with `profiles install` does **not** work: macOS accepts
+the file but ignores its privacy settings.
 
-Deploy a **PPPC / Privacy Preferences Policy Control** profile granting the
-agent:
+Deploy `<AgentName>-PPPC.mobileconfig` as a **device-level (computer)
+profile**:
 
-- **Screen Recording**
-- **Accessibility**
+| Tool | Where |
+|---|---|
+| Jamf Pro | *Computers → Configuration Profiles → Upload*, then scope it |
+| Kandji | *Library → Add New Item → Custom Profile*, assign to the Blueprint |
+| Microsoft Intune | *Devices → macOS → Configuration profiles → Create → Templates → Custom*, upload the file |
+| Mosyle | *Management → Custom Profiles* (or *Privacy Preferences*) |
+| Munki | Cannot install it. Munki has no MDM channel, so deliver the profile with whatever MDM enrolled the Mac |
 
-Without it, the agent connects and works, but remote screen viewing and
-control will fail. Ask us for the profile matching your build — it is tied to
-our code signature, so a generic one will not work.
+It grants the agent, and only the agent:
 
-You may also want a profile allowing the agent's background service, so users
-do not see a "Background Items Added" notification after install.
+- **Accessibility** and **event posting** — remote mouse and keyboard control
+- **Full Disk Access** — remote file management in protected folders
+- **Screen Recording**: Apple does not let any profile grant this one. The
+  profile does the most it can: a **standard user** can switch it on in
+  *System Settings → Privacy & Security → Screen Recording* without an
+  administrator password. The first remote screen session on each Mac will
+  prompt the signed-in user to do so.
+- **Background Items** — approves the agent's background service, so users
+  do not see a "Background Items Added" notification after install.
+
+Without the profile, the agent connects and works, but remote screen viewing
+and control fail until a local administrator approves each permission by hand.
+
+The profile is tied to the code signature and install path of the agent build
+it ships with, so a profile from a different vendor, or a hand-edited one,
+will not match. Use the one that came with your package, and take the new one
+when you take a new release (the identifiers inside are stable, so your MDM
+updates the existing profile in place).
 
 ---
 
@@ -175,16 +224,21 @@ server address, for example).
 
 ## Uninstalling
 
-`Uninstall.command` ships next to the package. Deploy it as a script, or run
-it by hand:
+Two forms of the same uninstaller ship next to the package. By hand, open the
+disk image and double-click `<AgentName>-Uninstall.pkg`: it is signed and
+notarized like the agent package, so Gatekeeper lets it run, and Installer asks
+for the administrator password. (A double-clicked `Uninstall.command` ends in
+"Apple could not verify" on macOS 15 and later; shell scripts cannot be
+notarized.) From a deployment tool, deploy the package, or run the script as
+root:
 
 ```sh
 sudo bash Uninstall.command
 ```
 
-It stops the agent, removes the whole install directory, clears its privacy
-permissions, and detects whether it is already running as root — so it works
-both from a deployment tool and from a Terminal window.
+Either way it stops the agent, removes the whole install directory, clears its
+privacy permissions, and detects whether it is already running as root — so
+the script works both from a deployment tool and from a Terminal window.
 
 It reports its result the same way the provisioning script does, so your tool
 can tell a real uninstall from a failed one:
@@ -228,15 +282,25 @@ sudo cat /usr/local/mesh_services/<CompanyName>/<ServiceName>/<AgentName>.msh
 ```
 
 **Install succeeded but the agent is stopped, and no script ran**
-Expected. The package alone does not start the agent. Run the provisioning
-script.
+Expected when the package was installed from a copy outside the disk image
+and no `.msh` was staged. `/var/log/install.log` shows what the installer
+found as `Configuration source:`. Run the provisioning script, or reinstall
+the package from the mounted image.
 
 ---
 
 ## Notes for whoever builds these files
 
-Both artifacts come from `build-macos-pkg.js` in this folder. See
-[README.md](README.md) for the full build, signing, and notarization steps.
+The agent `.pkg`, the uninstall `.pkg`, the profile and `Uninstall.command`
+come from `build-macos-pkg.js` in this folder; the `.msh` is the tenant's settings file as the server
+generates it, and the provisioning script is built from that same file. The
+disk image that carries them to the admin is produced by whoever hands the
+files over (AssetSonar builds a plain ISO 9660 image server-side, which macOS
+mounts under a `.dmg` name). See [README.md](README.md) for the full build,
+signing, and notarization steps.
+The `.pkg` build also writes `<AgentName>-PPPC.mobileconfig` beside it; the
+profile can be regenerated alone with `--emit-pppc-profile <agent-binary>` and
+the same naming flags.
 
 ```sh
 # Once per release, per architecture — then sign and notarize:
