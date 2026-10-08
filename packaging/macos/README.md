@@ -138,8 +138,12 @@ agent binary, so it can be rebuilt alone with the same naming flags:
 ```sh
 node packaging/macos/build-macos-pkg.js --emit-uninstall-pkg --out dist/universal \
   --company AssetSonar --service SonarSightAgent --exe SonarSightAgent \
-  --identifier com.assetsonar.sonarsight --display-name SonarSight --version 1.0.1
+  --identifier com.assetsonar.sonarsight --display-name SonarSight
 ```
+
+`--version` is the package's own metadata version (the receipt `pkgutil`
+shows), not an agent version; leave it at its default of 1.0 as the agent
+package does.
 
 The `.pkg` filename comes from `--exe` (override with `--pkg-name`), so the
 package and the `.msh` it requires are always named alike --

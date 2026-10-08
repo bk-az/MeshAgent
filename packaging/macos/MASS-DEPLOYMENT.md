@@ -23,7 +23,10 @@ after; see [Screen sharing needs one more thing](#screen-sharing-needs-one-more-
 > Why a disk image: macOS attributes installer scripts to the package's
 > signing team, which has no access to Downloads, Desktop or Documents, so a
 > package copied into one of those folders cannot read a settings file next
-> to it. A mounted image sits under `/Volumes`, which is not protected.
+> to it. A mounted image sits under `/Volumes`, which is not protected. One
+> consequence: the volume inherits the download's quarantine flag, so run the
+> scripts on it through `bash` (`sudo bash /Volumes/<VolumeName>/<script>`);
+> executing them directly is refused.
 
 > **Which package do I use?** There is one package per Mac processor type.
 > Run `uname -m` on a target Mac: `arm64` (Apple Silicon) or `x86_64` (Intel).
