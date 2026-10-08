@@ -621,9 +621,9 @@ function buildLaunchAgentPlist(companyName, serviceName, executableName) {
 //
 // The .pkg cannot grant Screen Recording, Accessibility or Full Disk Access.
 // Those are TCC decisions, and the only way to pre-approve them on a managed
-// Mac is a PPPC payload delivered by a user-approved MDM; the same profile
-// installed by double-clicking or "profiles install" is accepted but its TCC
-// payload is ignored. The payload identifies the agent by its installed path
+// Mac is a PPPC payload delivered by a user-approved MDM; macOS refuses the
+// same profile with an error when it is installed by double-clicking or with
+// "profiles install". The payload identifies the agent by its installed path
 // plus the designated requirement of its code signature, so it only matches a
 // binary that is (a) at /usr/local/mesh_services/<company>/<service>/<exe> and
 // (b) signed with the same identifier and Team ID. That is why it is emitted
@@ -743,7 +743,7 @@ function buildPrivacyProfile(p) {
         + payloads
         + '  </array>\n'
         + plistString('  ', 'PayloadDescription', 'Privacy permissions for ' + p.displayName + ' (' + installedPath + '). '
-            + 'Must be delivered by MDM: a PPPC payload is ignored when the profile is installed by hand. '
+            + 'Must be delivered by MDM: macOS refuses to install a PPPC payload by hand. '
             + 'Keyed to code signature ' + p.signature.identifier + (p.signature.team ? ' / team ' + p.signature.team : ' (ad-hoc)') + '.')
         + plistString('  ', 'PayloadDisplayName', p.displayName + ' Privacy Permissions')
         + plistString('  ', 'PayloadIdentifier', profileId)
@@ -1146,8 +1146,8 @@ function printHelp() {
         'Every build also writes <pkgName>-PPPC.mobileconfig next to the .pkg: the',
         'Privacy Preferences Policy Control profile (Accessibility, event posting, Full',
         'Disk Access, standard-user Screen Recording toggle, Background Items) keyed to',
-        'this binary\'s code signature and install path. Deploy it through MDM; it is',
-        'ignored when installed by hand. Regenerate it alone with:',
+        'this binary\'s code signature and install path. Deploy it through MDM; macOS',
+        'refuses a manual install. Regenerate it alone with:',
         '  node build-macos-pkg.js --emit-pppc-profile <path-to-agent-binary> [options]',
         '  (honours --out, --company, --service, --exe, --display-name, --pkg-name,',
         '   --identifier, --organization -- the naming MUST match the .pkg)',
@@ -1242,7 +1242,7 @@ async function main() {
             + (emitted.signature.adhoc ? ' [AD-HOC]' : ''));
         console.log('Wrote ' + emitted.profilePath);
         console.log('');
-        console.log('Deploy this profile through MDM (Jamf/Kandji/Intune/Mosyle). It is ignored if installed by hand.');
+        console.log('Deploy this profile through MDM (Jamf/Kandji/Intune/Mosyle). macOS refuses to install it by hand.');
         return;
     }
 

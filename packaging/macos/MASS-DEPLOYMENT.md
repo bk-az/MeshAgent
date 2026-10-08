@@ -176,8 +176,9 @@ You want to see `state = running` and a `pid`.
 macOS blocks remote control and access to protected files until it is
 explicitly allowed, and **a script or package cannot grant this** — only a
 configuration profile delivered by your MDM can. Installing the profile by
-double-clicking it or with `profiles install` does **not** work: macOS accepts
-the file but ignores its privacy settings.
+double-clicking it or with `profiles install` does **not** work: macOS refuses
+it with a profile-installation error, because this kind of payload may only
+come from an MDM.
 
 Deploy `<AgentName>-PPPC.mobileconfig` as a **device-level (computer)
 profile**:

@@ -169,8 +169,8 @@ Options (`node packaging/macos/build-macos-pkg.js --help`):
 The `.pkg` cannot grant Screen Recording, Accessibility or Full Disk Access.
 Those are TCC decisions, and the only way to pre-approve them on a managed
 Mac is a **Privacy Preferences Policy Control** payload delivered by a
-user-approved MDM. A profile installed by hand (double-click, `profiles
-install`) is accepted but its TCC payload is ignored.
+user-approved MDM. macOS refuses to install such a profile by hand: a
+double-click or `profiles install` ends in a profile-installation error.
 
 Every build therefore also writes `<pkgName>-PPPC.mobileconfig` next to the
 `.pkg`. It matches the agent by its installed path
