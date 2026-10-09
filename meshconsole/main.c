@@ -315,6 +315,7 @@ char* crashMemory = ILib_POSIX_InstallCrashHandler(argv[0]);
 		// Optional argv[2] = socket path; defaults to a tmp-dir path
 		// keyed by uid so the agent can bind it as a non-root user.
 		extern void kvm_set_listener_path(const char *path);
+		extern void kvm_request_user_session_permissions();
 		char defaultPath[128];
 		if (argc > 2 && argv[2] != NULL && argv[2][0] != '\0')
 		{
@@ -326,6 +327,11 @@ char* crashMemory = ILib_POSIX_InstallCrashHandler(argv[0]);
 				"/tmp/meshagent-kvm-%u.sock", (unsigned)getuid());
 			kvm_set_listener_path(defaultPath);
 		}
+		// Register with TCC from the user's GUI session so the binary is
+		// listed under Screen Recording / Accessibility at install time.
+		// The daemon's own kvm_check_permission() runs in the system
+		// session, where tccd ignores it.
+		kvm_request_user_session_permissions();
 		kvm_server_mainloop((void*)(uint64_t)getpid());
 		return 0;
 	}

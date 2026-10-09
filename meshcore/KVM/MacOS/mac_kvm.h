@@ -27,6 +27,7 @@
 typedef ILibTransport_DoneState(*ILibKVM_WriteHandler)(char *buffer, int bufferLen, void *reserved);
 
 void kvm_check_permission();
+void kvm_request_user_session_permissions();
 
 int kvm_relay_feeddata(char* buf, int len);
 void kvm_pause(int pause);

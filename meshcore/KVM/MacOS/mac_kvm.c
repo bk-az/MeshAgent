@@ -1191,25 +1191,44 @@ MPAuthorizationStatus _checkFDAUsingFile(const char *path) {
 }
 
 MPAuthorizationStatus _fullDiskAuthorizationStatus() {
-    char *userHomeFolderPath = getenv("HOME");
-    if (userHomeFolderPath == NULL) {
+    const char *userHomeFolderPath = getenv("HOME");
+    if (userHomeFolderPath == NULL || userHomeFolderPath[0] == '\0') {
         struct passwd *pw = getpwuid(getuid());
-        if (pw == NULL) {
+        if (pw == NULL || pw->pw_dir == NULL || pw->pw_dir[0] == '\0') {
             return MPAuthorizationStatusNotDetermined;
         }
         userHomeFolderPath = pw->pw_dir;
     }
 
-    const char *testFiles[] = {
-        strcat(strcpy(malloc(strlen(userHomeFolderPath) + 30), userHomeFolderPath), "/Library/Safari/CloudTabs.db"),
-        strcat(strcpy(malloc(strlen(userHomeFolderPath) + 30), userHomeFolderPath), "/Library/Safari/Bookmarks.plist"),
+    // Paths that are only readable with Full Disk Access. The first two are
+    // relative to the user's home folder, the rest are absolute. Each path is
+    // formatted into a bounded stack buffer: the previous implementation
+    // malloc'd strlen(home) + 30 bytes and strcat'd a 31-character suffix,
+    // overflowing the heap by two bytes for certain home path lengths.
+    static const char *homeRelativeFiles[] = {
+        "/Library/Safari/CloudTabs.db",
+        "/Library/Safari/Bookmarks.plist",
+    };
+    static const char *absoluteFiles[] = {
         "/Library/Application Support/com.apple.TCC/TCC.db",
         "/Library/Preferences/com.apple.TimeMachine.plist",
     };
+    const size_t homeRelativeCount = sizeof(homeRelativeFiles) / sizeof(homeRelativeFiles[0]);
+    const size_t absoluteCount = sizeof(absoluteFiles) / sizeof(absoluteFiles[0]);
+    char path[1024];
 
     MPAuthorizationStatus resultStatus = MPAuthorizationStatusNotDetermined;
-    for (int i = 0; i < 4; i++) {
-        MPAuthorizationStatus status = _checkFDAUsingFile(testFiles[i]);
+    for (size_t i = 0; i < homeRelativeCount + absoluteCount; i++) {
+        const char *testFile;
+        if (i < homeRelativeCount) {
+            int n = snprintf(path, sizeof(path), "%s%s", userHomeFolderPath, homeRelativeFiles[i]);
+            if (n < 0 || (size_t)n >= sizeof(path)) { continue; }
+            testFile = path;
+        } else {
+            testFile = absoluteFiles[i - homeRelativeCount];
+        }
+
+        MPAuthorizationStatus status = _checkFDAUsingFile(testFile);
         if (status == MPAuthorizationStatusAuthorized) {
             resultStatus = MPAuthorizationStatusAuthorized;
             break;
@@ -1222,6 +1241,56 @@ MPAuthorizationStatus _fullDiskAuthorizationStatus() {
     return resultStatus;
 }
 
+
+// Called at startup of the -kvmagent user LaunchAgent (meshconsole/main.c).
+//
+// kvm_check_permission() below runs inside the root LaunchDaemon, which lives
+// in the system audit session; tccd ignores Screen Recording / Accessibility
+// requests coming from there, so the binary never appears in System Settings
+// > Privacy & Security until the first Desktop session calls
+// CGDisplayCreateImage() from the user session. This registers the binary
+// with TCC from the GUI session right away, so the entry (and the one-time
+// system prompt) show up at install / login instead of at first capture.
+//
+// Deliberately narrower than kvm_check_permission(): no Full Disk Access
+// branch, because that opens System Settings via Launch Services and this
+// process is KeepAlive + RunAtLoad, so it would pop a window on every login
+// and every restart. FDA is still requested by the daemon, and is pre-granted
+// by the PPPC profile on managed Macs.
+void kvm_request_user_session_permissions()
+{
+    // At the LoginWindow session the LaunchAgent runs as root with no user
+    // to prompt; TCC would ignore the request anyway.
+    if (getuid() == 0) { return; }
+
+    // Screen Recording. Prompts once per binary; silent after a decision.
+    if (__builtin_available(macOS 10.15, *))
+    {
+        if (!CGPreflightScreenCaptureAccess()) { CGRequestScreenCaptureAccess(); }
+    }
+
+    // Accessibility (remote input). Only prompt while not yet trusted.
+    if (__builtin_available(macOS 10.9, *))
+    {
+        if (!AXIsProcessTrusted())
+        {
+            const void *keys[] = { kAXTrustedCheckOptionPrompt };
+            const void *values[] = { kCFBooleanTrue };
+            CFDictionaryRef options = CFDictionaryCreate(
+                kCFAllocatorDefault,
+                keys,
+                values,
+                sizeof(keys) / sizeof(*keys),
+                &kCFCopyStringDictionaryKeyCallBacks,
+                &kCFTypeDictionaryValueCallBacks);
+            if (options != NULL)
+            {
+                AXIsProcessTrustedWithOptions(options);
+                CFRelease(options);
+            }
+        }
+    }
+}
 
 void kvm_check_permission()
 {
