@@ -76,15 +76,29 @@ make -j4 macos ARCHID=16                 # x86_64 -> meshagent_osx-x86-64
 
 ## 2. Sign each binary
 
+Always pass the **same `--identifier`** to both. Without it, codesign derives
+the identifier from the filename (`meshagent_osx-arm-64` vs
+`meshagent_osx-x86-64`), and a universal binary assembled from those two
+slices fails every TCC check: tccd evaluates the stored requirement
+(`identifier "..." and anchor apple generic ...`) against **every slice** of
+the file, so the slice with the other identifier makes the whole evaluation
+fail (`-67050`). Screen Recording is then denied silently (desktop shows only
+the wallpaper, no input) and the Full Disk Access toggle turns itself off.
+`codesign --verify` does not catch this; `build-macos-pkg.js` does.
+
 ```sh
-codesign --sign "Developer ID Application: Your Org (TEAMID)" \
+ID=com.assetsonar.sonarsight.agent
+codesign --sign "Developer ID Application: Your Org (TEAMID)" --identifier "$ID" \
   --options runtime --timestamp meshagent_osx-arm-64
-codesign --sign "Developer ID Application: Your Org (TEAMID)" \
+codesign --sign "Developer ID Application: Your Org (TEAMID)" --identifier "$ID" \
   --options runtime --timestamp meshagent_osx-x86-64
 
-codesign -dv meshagent_osx-arm-64        # verify: TeamIdentifier should be set, not "adhoc"
-codesign -dv meshagent_osx-x86-64
+codesign -dv meshagent_osx-arm-64 2>&1 | grep -E '^Identifier|^TeamIdentifier'   # same Identifier on both; TeamIdentifier set, not "adhoc"
+codesign -dv meshagent_osx-x86-64 2>&1 | grep -E '^Identifier|^TeamIdentifier'
 ```
+
+The identifier is also what a PPPC profile and `tccutil reset` key on, so
+keep it stable across releases.
 
 ## 3. Build a pkg per architecture (no `.msh` baked into either)
 
@@ -110,7 +124,26 @@ node packaging/macos/build-macos-pkg.js meshagent_osx-x86-64 dist/x86_64 \
 
 Produces `dist/arm64/SonarSightAgent.pkg` and
 `dist/x86_64/SonarSightAgent.pkg` (unsigned), plus a matching
-`Uninstall.command` in each folder.
+`Uninstall.command`, `SonarSightAgent-Uninstall.pkg` and
+`SonarSightAgent-PPPC.mobileconfig` in each folder (see [Privacy permissions
+profile](#privacy-permissions-profile-pppc) below).
+
+`SonarSightAgent-Uninstall.pkg` is a payload-free package whose postinstall is
+the uninstaller script. It exists because a double-clicked `.command` is
+refused by Gatekeeper on macOS 15+ and a shell script cannot be notarized,
+whereas a notarized package opens in Installer and runs the script as root.
+Sign and notarize it exactly like the agent package (steps 4-5). It needs no
+agent binary, so it can be rebuilt alone with the same naming flags:
+
+```sh
+node packaging/macos/build-macos-pkg.js --emit-uninstall-pkg --out dist/universal \
+  --company AssetSonar --service SonarSightAgent --exe SonarSightAgent \
+  --identifier com.assetsonar.sonarsight --display-name SonarSight
+```
+
+`--version` is the package's own metadata version (the receipt `pkgutil`
+shows), not an agent version; leave it at its default of 1.0 as the agent
+package does.
 
 The `.pkg` filename comes from `--exe` (override with `--pkg-name`), so the
 package and the `.msh` it requires are always named alike --
@@ -132,7 +165,50 @@ Options (`node packaging/macos/build-macos-pkg.js --help`):
 | `--version <x.y.z>` | `1.0` | Package version |
 | `--background <path>` | — | Optional PNG for the installer sidebar |
 | `--sign <identity>` | — | Sign in this same step via `productbuild --sign` (skips step 4) |
+| `--organization <name>` | `--company` | `PayloadOrganization` shown in the PPPC profile (the legal entity, e.g. the Developer ID holder) |
 | `--keep-work` | off | Keep the intermediate build directory, for debugging |
+
+### Privacy permissions profile (PPPC)
+
+The `.pkg` cannot grant Screen Recording, Accessibility or Full Disk Access.
+Those are TCC decisions, and the only way to pre-approve them on a managed
+Mac is a **Privacy Preferences Policy Control** payload delivered by a
+user-approved MDM. macOS refuses to install such a profile by hand: a
+double-click or `profiles install` ends in a profile-installation error.
+
+Every build therefore also writes `<pkgName>-PPPC.mobileconfig` next to the
+`.pkg`. It matches the agent by its installed path
+(`/usr/local/mesh_services/<company>/<service>/<exe>`) **and** the designated
+requirement of its code signature, taken verbatim from
+`codesign -d -r- <binary>`. Both halves have to match, which is why the
+profile is generated from the same binary and naming flags as the package,
+and why the arm64 and x86_64 folders get identical profiles when the thin
+binaries are signed with the same identifier (step 2). Payload UUIDs are
+derived from the identifiers, so rebuilding with the same inputs gives a
+byte-identical file and an MDM updates the existing profile in place.
+
+| Service | Setting | Why |
+|---|---|---|
+| `Accessibility` | Allow | remote mouse / keyboard |
+| `PostEvent` | Allow | synthesized CGEvents |
+| `SystemPolicyAllFiles` | Allow | Full Disk Access (file manager, terminal, as root) |
+| `ScreenCapture` | AllowStandardUserToSetSystemService | the most a profile may do: a non-admin can enable Screen Recording without an admin password |
+| Background Items (`com.apple.servicemanagement`) | `LabelPrefix` = `--service`, Team ID | suppresses the "Background Items Added" notice; only emitted for a Developer ID signature |
+
+To regenerate the profile without building a package (same naming flags as
+the `.pkg`, or it points at the wrong path):
+
+```sh
+node packaging/macos/build-macos-pkg.js --emit-pppc-profile meshagent_osx-arm-64 \
+  --out dist/arm64 --company AssetSonar --service SonarSightAgent \
+  --exe SonarSightAgent --identifier com.assetsonar.sonarsight \
+  --display-name "Sonar Sight" --organization "Your Org Inc"
+```
+
+`--skip-signature-check` also skips the profile, since there is no verified
+signature to key it to. An ad-hoc signed binary still gets a profile, but its
+requirement is a `cdhash` that changes with every build, so it is only good
+for testing that exact binary.
 
 ## 4. Sign each pkg
 
@@ -227,8 +303,27 @@ mkdir -p out/acme
 cp dist/arm64/SonarSightAgent-signed.pkg   out/acme/SonarSightAgent-arm64.pkg
 cp dist/x86_64/SonarSightAgent-signed.pkg  out/acme/SonarSightAgent-x86_64.pkg
 cp dist/arm64/Uninstall.command            out/acme/Uninstall.command
+cp dist/arm64/SonarSightAgent-Uninstall-signed.pkg out/acme/SonarSightAgent-Uninstall.pkg
+cp dist/arm64/SonarSightAgent-PPPC.mobileconfig out/acme/SonarSightAgent-PPPC.mobileconfig
+cp acme.msh                                out/acme/SonarSightAgent.msh
 # plus out/acme/SonarSightAgent-provision.sh from step 7
 ```
+
+Hand the folder over as a disk image, not a zip. Since macOS 10.15 an
+installer script is TCC-attributed to the package's signing team, which has no
+access to Downloads, Desktop or Documents, so a sibling `.msh` in an extracted
+zip reads as "Operation not permitted" and the agent is left stopped. Mounted
+under `/Volumes` the same pair works, and a double-click on the package
+configures and starts the agent:
+
+```sh
+hdiutil create -volname SonarSight -srcfolder out/acme -format UDZO out/SonarSightAgent-acme.dmg
+```
+
+An ISO 9660 image wrapped in a UDIF container does as well, which is what
+AssetSonar generates on its Linux servers; the wrapper matters, because Finder
+opens a window on mount only for UDIF images, not for a bare ISO. The bare `.msh` also
+serves MDMs that can stage files but not run scripts (see MASS-DEPLOYMENT.md).
 
 Give the IT admin [MASS-DEPLOYMENT.md](MASS-DEPLOYMENT.md); it has the
 Jamf / Kandji / Intune / Mosyle / Munki steps and the exit-code table.
@@ -287,16 +382,56 @@ Works both from a Terminal and from a deployment tool: it re-execs itself
 under `sudo` only when it isn't already root. It also removes the agent's
 diagnostic service and clears its TCC/privacy grants.
 
+`Uninstall.command` only knows the one company/service/exe triple it was
+built with. For a Mac where the agent was renamed, upgraded over, installed
+by hand, or left stale entries in System Settings, use the pattern-based
+purge script instead:
+
+```sh
+sudo bash packaging/macos/purge-macos-agent.sh --dry-run   # show the plan, change nothing
+sudo bash packaging/macos/purge-macos-agent.sh             # show the plan, then ask to confirm
+sudo bash packaging/macos/purge-macos-agent.sh --yes       # MDM: no confirmation prompt
+```
+
+It discovers every launchd job, process, binary, receipt, firewall rule and
+TCC grant (Full Disk Access, Screen Recording, Accessibility, Input
+Monitoring, ...) matching `meshagent|mesh_services|meshcentral|assetsonar|sonarsight`
+(add more with `--pattern`), prints the complete plan, removes exactly that
+after confirmation, then verifies and exits `0` only when nothing is left.
+
+It touches only the agent. It never resets a privacy pane or Login Items
+for all apps, has no flag that would, refuses a TCC delete if any matched
+row is not the agent's, and validates every user-supplied pattern.
+
+Run it from a terminal app that has Full Disk Access (System Settings >
+Privacy & Security > Full Disk Access > add Terminal, then quit and reopen
+it). `tccutil reset` can only name signed identifiers, so without FDA the
+entries of an ad-hoc-signed or already-deleted binary stay listed and the
+script exits `3` to say so.
+
 ## Appendix: universal binary
 
 A single arm64+x86_64 binary avoids picking the right `.pkg` per Mac, at
 the cost of roughly doubling the shipped size (every Mac only ever runs
 one slice; the other sits on disk unused) and one extra build step:
 
+Sign the two thin binaries first (step 2, same `--identifier` on both), then
+merge without signing again, so each slice stays byte-identical to the thin
+file the server hands out:
+
 ```sh
 lipo -create -output meshagent_universal meshagent_osx-arm-64 meshagent_osx-x86-64
 lipo -info meshagent_universal            # verify: x86_64 arm64
+
+# What tccd will do: the whole file must satisfy one slice's designated
+# requirement without forcing an architecture. Must print
+# "explicit requirement satisfied"; a failure means the identifiers differ.
+DR=$(codesign -d -r- -a arm64 meshagent_universal 2>/dev/null | sed -n 's/^designated => //p')
+codesign -vvv -R="$DR" meshagent_universal
 ```
+
+`build-macos-pkg.js` runs this same check and refuses the binary if it fails
+(`--skip-signature-check` bypasses it for local experiments only).
 
 Sign, package, sign-the-pkg, and notarize it exactly as in steps 2–5
 above, just pointing at `meshagent_universal` instead of the two
