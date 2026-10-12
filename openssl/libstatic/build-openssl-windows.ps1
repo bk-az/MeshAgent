@@ -24,6 +24,7 @@ param(
 	[string]$Tarball = $env:OPENSSL_TARBALL
 )
 $ErrorActionPreference = 'Stop'
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 foreach ($tool in 'cl', 'nmake', 'perl') {
@@ -67,7 +68,8 @@ try {
 		Push-Location $Src
 		try {
 			Write-Host "==> Configuring $Platform $($variant.Name) ($Target)"
-			& perl Configure $Target @CommonOpts @($variant.Extra)
+			$configureArgs = @($Target) + $CommonOpts + @($variant.Extra)
+			& perl Configure @configureArgs
 			if ($LASTEXITCODE -ne 0) { throw "Configure failed" }
 			Write-Host "==> Building $Platform $($variant.Name)"
 			& nmake build_libs

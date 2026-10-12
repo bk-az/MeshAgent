@@ -86,10 +86,16 @@ not been rebuilt.
 ### Windows (`libstatic/*.lib`)
 
 ```powershell
-# from an x64 / x86 / ARM64 Native Tools prompt (or after vcvarsall), Perl on PATH
-pwsh openssl/libstatic/build-openssl-windows.ps1 -Platform x64
-pwsh openssl/libstatic/build-openssl-windows.ps1 -Platform x86
-pwsh openssl/libstatic/build-openssl-windows.ps1 -Platform ARM64
+# any PowerShell window on a machine with Visual Studio 2022; finds VS, Perl (installs
+# Strawberry Perl via winget if needed) and builds x64, x86 and ARM64 in one go.
+powershell -ExecutionPolicy Bypass -File openssl\libstatic\build-openssl-windows-all.ps1
+# add -BuildAgent to also build MeshAgent-2022.sln and check the .exe banners
+```
+
+The per-platform script can also be run directly from a matching Native Tools prompt:
+
+```powershell
+pwsh openssl/libstatic/build-openssl-windows.ps1 -Platform x64     # or x86, ARM64
 ```
 
 Each run builds a release (`/MT`) and a `--debug` (`/MTd`) variant with `VC-WIN64A`, `VC-WIN32`
