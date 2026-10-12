@@ -64,4 +64,6 @@ in [openssl/BUILDING.md](openssl/BUILDING.md).
 
 ```sh
 ./openssl/libstatic/macos/build-openssl-macos.sh 3.5.9 --refresh-headers   # macOS libs + headers
+powershell -ExecutionPolicy Bypass -File openssl\libstatic\build-openssl-windows-all.ps1 -BuildAgent   # Windows x64/x86/ARM64 libs, on a VS 2022 machine
+./openssl/libstatic/build-openssl-static.sh x86-64                           # one Linux/BSD arch, run on that platform
 ```

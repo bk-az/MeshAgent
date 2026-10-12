@@ -85,25 +85,87 @@ not been rebuilt.
 
 ### Windows (`libstatic/*.lib`)
 
+Step-by-step guide for a Windows machine with Visual Studio 2022 (Community, Professional or
+Build Tools all work). Everything else the build needs is installed or located by the script.
+
+**1. Prerequisites**
+
+- Visual Studio 2022 with the workload *Desktop development with C++*. For the ARM64
+  libraries also tick the component *MSVC v143 - VS 2022 C++ ARM64/ARM64EC build tools*
+  (Visual Studio Installer > Modify > Individual components). Without it the script builds
+  x64 and x86 and skips ARM64 with a warning.
+- Git, and this branch checked out (`git checkout openssl_upgrade`).
+- Internet access: the script downloads `openssl-<version>.tar.gz` from GitHub and, if no
+  native Windows Perl is installed, installs Strawberry Perl through `winget`. (Git's bundled
+  msys Perl cannot build MSVC targets and is ignored.) To install Perl by hand instead, get it
+  from https://strawberryperl.com and re-run.
+
+**2. Build the libraries**
+
+Open a normal PowerShell window (no developer prompt needed), `cd` to the repository root
+and run:
+
 ```powershell
-# any PowerShell window on a machine with Visual Studio 2022; finds VS, Perl (installs
-# Strawberry Perl via winget if needed) and builds x64, x86 and ARM64 in one go.
-powershell -ExecutionPolicy Bypass -File openssl\libstatic\build-openssl-windows-all.ps1
-# add -BuildAgent to also build MeshAgent-2022.sln and check the .exe banners
+powershell -ExecutionPolicy Bypass -File openssl\libstatic\build-openssl-windows-all.ps1 -BuildAgent
 ```
 
-The per-platform script can also be run directly from a matching Native Tools prompt:
+The script finds Visual Studio with `vswhere`, loads the x64, x86 and ARM64 compiler
+environments in turn (x64-hosted cross compilers, so an x64 machine builds all three), and
+for every platform builds a release (`/MT`) and a debug (`/MTd`) variant of `libcrypto` and
+`libssl`. Each result is checked for the `LIBCMT` / `LIBCMTD` default-library directive (so a
+`/MD` build cannot slip in) and for the `OpenSSL <version>` banner before it overwrites the
+matching files:
 
-```powershell
-pwsh openssl/libstatic/build-openssl-windows.ps1 -Platform x64     # or x86, ARM64
+| Platform | Files replaced in `openssl/libstatic` |
+|---|---|
+| x64   | `libcrypto64MT.lib` `libssl64MT.lib` `libcrypto64MTd.lib` `libssl64MTd.lib` |
+| x86   | `libcrypto32MT.lib` `libssl32MT.lib` `libcrypto32MTd.lib` `libssl32MTd.lib` |
+| ARM64 | `libcryptoARM64.lib` `libsslARM64.lib` `libcryptoARM64d.lib` `libsslARM64d.lib` |
+
+`-BuildAgent` then builds `MeshAgent-2022.sln` (Release) for every platform that succeeded
+and fails if a produced `Release\*.exe` does not contain the `OpenSSL <version>` string.
+Expect 30 to 60 minutes in total; the end of the output is a summary like:
+
+```
+Summary (OpenSSL 3.5.9):
+  x64    built, agent verified
+  x86    built, agent verified
+  ARM64  built, agent verified
+  libcrypto32MT.lib        OpenSSL 3.5.9
+  ...
 ```
 
-Each run builds a release (`/MT`) and a `--debug` (`/MTd`) variant with `VC-WIN64A`, `VC-WIN32`
-or `VC-WIN64-ARM` and overwrites the matching `libcrypto64MT.lib` / `libcrypto64MTd.lib`,
-`*32MT*.lib` or `*ARM64*.lib` files (and the `libssl` twins). The script checks that the result
-carries the `LIBCMT` / `LIBCMTD` default-library directive, so a `/MD` build cannot slip in.
+Useful options: `-Platforms x64,x86` to build a subset, `-Version 3.5.10` for another
+release, `-Tarball C:\path\openssl-3.5.9.tar.gz` to reuse a downloaded archive (its
+SHA256 is still verified against the published checksum).
+
+**3. Check and commit**
+
+```powershell
+findstr /M /C:"OpenSSL 3.5.9" Release\MeshAgent64.exe      # prints the file name when found
+git status                                                 # the 12 .lib files should be modified
+git add openssl\libstatic\*.lib
+git commit -m "Rebuild Windows OpenSSL static libraries (3.5.9)"
+git push
+```
+
+Only the `.lib` files need committing; the headers in `openssl/include/openssl` are already
+the matching 3.5.9 ones on this branch. After the push the *Windows Build* GitHub workflow
+links the agent against the new libraries as a second check.
+
+**Troubleshooting**
+
+- *"vswhere.exe not found"* or *"No Visual Studio 2022 ... found"*: install the C++ workload
+  listed above; a bare Visual Studio without C++ tools is not enough.
+- *"A native Windows Perl is required"*: `winget` is unavailable or was blocked; install
+  Strawberry Perl manually and re-run.
+- *"Configure failed"* or *"nmake failed"*: the full OpenSSL output is printed just above the
+  message. The commonest cause is an msys Perl earlier on `PATH` than Strawberry Perl.
+- Running the per-platform script directly, from a matching *Native Tools* prompt, is also
+  possible: `pwsh openssl\libstatic\build-openssl-windows.ps1 -Platform x64` (or `x86`, `ARM64`).
+
 The project files already link `Crypt32.lib`, `Bcrypt.lib` and `ws2_32.lib`, which is all
-OpenSSL 3+ needs.
+OpenSSL 3+ needs; no project changes are required.
 
 ### All of the above from GitHub Actions
 
