@@ -18,10 +18,14 @@ limitations under the License.
 #include "ILibCrypto.h"
 #ifndef WIN32
 #include <sys/file.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #include <unistd.h>
 #else
 #include <io.h>
 #include <fcntl.h>
+#include <sddl.h>
+#include <aclapi.h>
 #endif
 
 #if defined(WIN32) && !defined(_WIN32_WCE) && !defined(_MINCORE)
@@ -504,6 +508,33 @@ void ILibSimpleDataStore_RebuildKeyTable(ILibSimpleDataStore_Root *root)
 	}
 }
 
+// Restrict access to the data store file so that only the account running the agent
+// (SYSTEM / root) and administrators can read it. The store holds the node's identity
+// material (certificates and private keys), so it must not inherit the world-readable
+// permissions of its parent folder (e.g. Program Files, /usr/local). This is applied on
+// every writable open, so existing installs are hardened on the next agent start.
+#ifdef WIN32
+static void ILibSimpleDataStore_RestrictPermissions(char* filePath)
+{
+	PSECURITY_DESCRIPTOR sd = NULL;
+	PACL dacl = NULL;
+	BOOL daclPresent = FALSE, daclDefaulted = FALSE;
+
+	// SYSTEM: full, Administrators: full, file owner: full. Protected DACL (no inheritance).
+	if (ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)", SDDL_REVISION_1, &sd, NULL) != 0 &&
+		GetSecurityDescriptorDacl(sd, &daclPresent, &dacl, &daclDefaulted) != 0 && daclPresent != 0 && dacl != NULL)
+	{
+		SetNamedSecurityInfoW(ILibUTF8ToWide(filePath, -1), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, NULL, NULL, dacl, NULL);
+	}
+	if (sd != NULL) { LocalFree(sd); }
+}
+#else
+static void ILibSimpleDataStore_RestrictPermissions(FILE* f)
+{
+	ignore_result(fchmod(fileno(f), S_IRUSR | S_IWUSR)); // 0600
+}
+#endif
+
 // Open the data store file
 FILE* ILibSimpleDataStore_OpenFileEx3(char* filePath, int forceTruncateIfNonZero, int readonly, int *created)
 {
@@ -532,6 +563,8 @@ FILE* ILibSimpleDataStore_OpenFileEx3(char* filePath, int forceTruncateIfNonZero
 				h = CreateFileW(ILibUTF8ToWide(filePath, -1), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
 			}
 		}
+		if (h == INVALID_HANDLE_VALUE) { return(NULL); }
+		ILibSimpleDataStore_RestrictPermissions(filePath);
 		int fd = _open_osfhandle((intptr_t)h, _O_RDWR);
 		if (fd == -1) { CloseHandle(h); return(NULL); }
 		f = _fdopen(fd, "wb+N");
@@ -551,11 +584,16 @@ FILE* ILibSimpleDataStore_OpenFileEx3(char* filePath, int forceTruncateIfNonZero
 
 	if (forceTruncateIfNonZero != 0 || (f = fopen(filePath, flag)) == NULL)
 	{
+		int fd;
 		if (created != NULL) { *created = 1; }
-		f = fopen(filePath, "wb+");
+		// Create the file owner-only (0600) from the start, regardless of umask
+		fd = open(filePath, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+		f = (fd < 0) ? NULL : fdopen(fd, "wb+");
+		if (f == NULL && fd >= 0) { close(fd); }
 	}
 	if (f == NULL) { return NULL; } // If we failed to open the file, stop now.
 	if (readonly == 0 && flock(fileno(f), LOCK_EX | LOCK_NB) != 0) { fclose(f); return NULL; } // Request exclusive lock on this file, no blocking.
+	if (readonly == 0) { ILibSimpleDataStore_RestrictPermissions(f); }
 #endif
 
 	return f;
