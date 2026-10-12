@@ -66,26 +66,49 @@ build machine (the header directory is shared by every platform).
 
 ### Linux and BSD
 
-Run the matching `openssl/libstatic/linux/openssl-<arch>` script from a directory that
-contains the unpacked OpenSSL source as `../openssl` (see the comment in each script).
-The scripts set `CC` for the cross toolchains used upstream; adjust the paths for your
-machine.
+```sh
+./openssl/libstatic/build-openssl-static.sh <arch> [version]
+# <arch>: x86 | x86-64 | alpine-x86-64 | arm64 | aarch64 | armhf | freebsd_x86-64 | openbsd_x86-64
+```
+
+The script compiles natively with the platform's own compiler (musl-gcc for `alpine-x86-64`),
+verifies the tarball checksum, checks that the `OPENSSL_NO_*` feature set matches the vendored
+`configuration.h`, and copies `libcrypto.a` / `libssl.a` into `libstatic/linux/<arch>` or
+`libstatic/bsd/<arch>`. Run it on the same base image the agent is built on in
+`.github/workflows/linux-build.yml` (debian:bookworm for `aarch64`, the armv6 Raspbian image for
+`armhf`, FreeBSD 13.5 for `freebsd_x86-64`) so the library shares the agent's libc baseline.
+
+The remaining `libstatic/linux/*` directories (mips, poky, pogo, ...) are legacy upstream targets
+that this fork does not build; the `openssl-<arch>` scripts next to them document the original
+cross-toolchain invocations and have been updated to the 3.x option list, but the libraries have
+not been rebuilt.
 
 ### Windows (`libstatic/*.lib`)
 
-From a Visual Studio x64 / x86 / ARM64 Native Tools prompt with Perl and NASM installed:
-
-```bat
-perl Configure VC-WIN64A  no-shared no-module no-dso no-weak-ssl-ciphers no-srp no-psk no-comp no-zlib no-zlib-dynamic no-err no-rc5 no-idea no-md4 no-rmd160 no-seed no-camellia no-bf no-cast no-md2 no-mdc2 no-tests no-apps no-docs --api=1.1.0
-nmake build_libs
+```powershell
+# from an x64 / x86 / ARM64 Native Tools prompt (or after vcvarsall), Perl on PATH
+pwsh openssl/libstatic/build-openssl-windows.ps1 -Platform x64
+pwsh openssl/libstatic/build-openssl-windows.ps1 -Platform x86
+pwsh openssl/libstatic/build-openssl-windows.ps1 -Platform ARM64
 ```
 
-`no-shared` makes the VC targets use `/MT` (release) and `/MTd` (with `--debug`), which is
-what the existing `libcrypto64MT.lib` / `libcrypto64MTd.lib` names expect. Use `VC-WIN32`
-for the 32-bit `*32MT*.lib` files and `VC-WIN64-ARM` for the `*ARM64*.lib` files, and copy
-the resulting `libcrypto.lib` / `libssl.lib` over the corresponding files in `libstatic`.
+Each run builds a release (`/MT`) and a `--debug` (`/MTd`) variant with `VC-WIN64A`, `VC-WIN32`
+or `VC-WIN64-ARM` and overwrites the matching `libcrypto64MT.lib` / `libcrypto64MTd.lib`,
+`*32MT*.lib` or `*ARM64*.lib` files (and the `libssl` twins). The script checks that the result
+carries the `LIBCMT` / `LIBCMTD` default-library directive, so a `/MD` build cannot slip in.
 The project files already link `Crypt32.lib`, `Bcrypt.lib` and `ws2_32.lib`, which is all
-OpenSSL 3+/4 needs.
+OpenSSL 3+ needs.
+
+### All of the above from GitHub Actions
+
+`.github/workflows/openssl-libs.yml` (manual `workflow_dispatch`, input: version) runs the two
+scripts on the same runners and container images as the agent build workflows and uploads one
+artifact per platform:
+
+```sh
+gh workflow run openssl-libs.yml --ref <branch> -f version=3.5.9
+gh run download <run-id> -D /tmp/openssl-libs     # then copy into openssl/libstatic
+```
 
 ## Upgrading to a newer OpenSSL
 
