@@ -24,6 +24,7 @@ param(
 	[string]$Tarball = $env:OPENSSL_TARBALL
 )
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'   # the 5.1 progress bar makes downloads very slow
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -50,9 +51,13 @@ try {
 	if (-not $Tarball) {
 		$Tarball = Join-Path $Work "openssl-$Version.tar.gz"
 		Write-Host "Downloading openssl-$Version.tar.gz"
-		Invoke-WebRequest -Uri "$BaseUrl/openssl-$Version.tar.gz" -OutFile $Tarball
+		Invoke-WebRequest -UseBasicParsing -Uri "$BaseUrl/openssl-$Version.tar.gz" -OutFile $Tarball
 	}
-	$Expected = ((Invoke-WebRequest -Uri "$BaseUrl/openssl-$Version.tar.gz.sha256").Content.Trim() -split '\s+')[0]
+	# Download the checksum to a file: Windows PowerShell 5.1 returns binary content as a byte
+	# array for this file's MIME type, so .Content cannot be used as a string.
+	$ShaFile = Join-Path $Work 'expected.sha256'
+	Invoke-WebRequest -UseBasicParsing -Uri "$BaseUrl/openssl-$Version.tar.gz.sha256" -OutFile $ShaFile
+	$Expected = ((Get-Content $ShaFile -Raw).Trim() -split '\s+')[0].ToLower()
 	$Actual = (Get-FileHash -Algorithm SHA256 $Tarball).Hash.ToLower()
 	if ($Expected -ne $Actual) { throw "SHA256 mismatch for ${Tarball}: expected $Expected, actual $Actual" }
 	Write-Host "Verified openssl-$Version.tar.gz ($Actual)"

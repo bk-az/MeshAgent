@@ -37,6 +37,7 @@ param(
 	[string]$Tarball
 )
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -100,7 +101,7 @@ if (-not $Tarball) {
 	$Tarball = Join-Path $env:TEMP "openssl-$Version.tar.gz"
 	if (-not (Test-Path $Tarball)) {
 		Write-Host "Downloading openssl-$Version.tar.gz to $Tarball"
-		Invoke-WebRequest -Uri "https://github.com/openssl/openssl/releases/download/openssl-$Version/openssl-$Version.tar.gz" -OutFile $Tarball
+		Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/openssl/openssl/releases/download/openssl-$Version/openssl-$Version.tar.gz" -OutFile $Tarball
 	}
 }
 # build-openssl-windows.ps1 verifies the SHA256 against the published checksum on every run.
