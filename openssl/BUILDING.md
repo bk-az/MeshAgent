@@ -182,6 +182,55 @@ gh workflow run openssl-libs.yml --ref <branch> -f version=3.5.9
 gh run download <run-id> -D /tmp/openssl-libs     # then copy into openssl/libstatic
 ```
 
+## Verification checklist
+
+Work through these in order; each stage proves the one before it.
+
+**1. Libraries in the tree** (every file, every platform):
+
+```sh
+# macOS / Linux: every line must print the same 3.x version, none may print 1.1.1
+for f in $(find openssl/libstatic -name 'libcrypto*'); do printf '%-55s ' "$f"; strings "$f" | grep -m1 -o -E 'OpenSSL [0-9.]+[a-z]?'; echo; done
+```
+```powershell
+# Windows
+Get-ChildItem openssl\libstatic\*.lib | % { "{0,-24} {1}" -f $_.Name, (Select-String -Path $_ -Pattern 'OpenSSL [0-9.]+[a-z]?' | Select -First 1).Matches[0].Value }
+```
+`grep -m1 OPENSSL_VERSION_STR openssl/include/openssl/opensslv.h` must show the same version.
+
+**2. Every agent builds and links.** `make macos ARCHID=29` / `16`, `make linux ARCHID=6` etc.,
+`msbuild MeshAgent-2022.sln /p:Configuration=Release /p:Platform=x64` (and x86, ARM64). A link
+error mentioning `OPENSSL_` or `SSL_` symbols means the library for that platform is still old.
+After the branch is pushed, the *Windows Build*, *Linux Build*, *macOS Build* and *FreeBSD Build*
+workflows must all be green.
+
+**3. The binaries carry the new version and no old banner.**
+
+```sh
+strings meshagent_osx-arm-64 | grep -E 'OpenSSL [0-9]'      # exactly one line, the new version
+strings meshagent_osx-arm-64 | grep -c 'OpenSSL 1\.1'        # must print 0
+```
+```powershell
+findstr /M /C:"OpenSSL 3." Release\MeshAgent64.exe            # prints the file name
+findstr /M /C:"OpenSSL 1.1" Release\MeshAgent64.exe           # prints nothing
+```
+
+**4. The agent runs with the new library.** From a scratch folder (never install a test build):
+`./meshagent_osx-arm-64 -info` prints `Using OpenSSL 3.x.y`.
+
+**5. Existing identities survive.** Copy a `.db` from an installed 1.1.1-era agent next to the
+new binary in the scratch folder, start it once against the server, and confirm the server shows
+the same node ID (no new device appears). This exercises the RC2 PKCS#12 legacy-provider path.
+
+**6. A real session works.** Install the packaged build on one test machine per platform, open a
+desktop session, a terminal session and a file transfer from MeshCentral, and confirm the agent
+reconnects after `kickstart`/service restart.
+
+**7. What the pentester sees.** Download the installer from the tenant's Owner download page,
+extract the agent executable from it, and repeat step 3 on *that* file. The finding is closed
+only when the file customers download reports the new version. Keep the build date and OpenSSL
+version in the release notes / asset inventory as the report's remediation asks.
+
 ## Upgrading to a newer OpenSSL
 
 1. Run the macOS script with the new version and `--refresh-headers`.
