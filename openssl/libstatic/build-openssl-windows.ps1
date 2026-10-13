@@ -82,7 +82,9 @@ try {
 
 			# The vendored headers come from the macOS build; the feature set must match.
 			if (Test-Path $Vendored) {
-				$filter = { $_ -match '^#\s*define OPENSSL_NO_' -and $_ -notmatch 'OPENSSL_NO_ASM' }
+				# Ignored: no-asm, and the engines/loaders OpenSSL enables per OS (Windows cert store,
+				# Linux AF_ALG, BSD /dev/crypto); none of them affect the public headers.
+				$filter = { $_ -match '^#\s*define OPENSSL_NO_' -and $_ -notmatch 'OPENSSL_NO_(ASM|WINSTORE|AFALGENG|DEVCRYPTOENG)\b' }
 				$built = Get-Content 'include\openssl\configuration.h' | Where-Object $filter | ForEach-Object { $_ -replace '\s+', ' ' } | Sort-Object
 				$vend  = Get-Content $Vendored | Where-Object $filter | ForEach-Object { $_ -replace '\s+', ' ' } | Sort-Object
 				$diff = Compare-Object $vend $built

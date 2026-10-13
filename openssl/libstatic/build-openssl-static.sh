@@ -105,8 +105,11 @@ echo "==> Building $ARCH with $MAKE -j$JOBS"
 # so that the public structs and OPENSSL_NO_* switches match this library.
 VENDORED="$HERE/../include/openssl/configuration.h"
 if [ -f "$VENDORED" ]; then
-	grep -h '^#  *define OPENSSL_NO_' "$SRC/include/openssl/configuration.h" | grep -v 'OPENSSL_NO_ASM' | sort > "$WORK/built.no"
-	grep -h '^#  *define OPENSSL_NO_' "$VENDORED" | grep -v 'OPENSSL_NO_ASM' | sort > "$WORK/vendored.no"
+	# Ignored: no-asm, and the engines/loaders OpenSSL enables per OS (Windows cert store,
+	# Linux AF_ALG, BSD /dev/crypto); none of them affect the public headers.
+	IGNORE='OPENSSL_NO_(ASM|WINSTORE|AFALGENG|DEVCRYPTOENG)$'
+	grep -h '^#  *define OPENSSL_NO_' "$SRC/include/openssl/configuration.h" | sed 's/  */ /g' | grep -v -E "$IGNORE" | sort > "$WORK/built.no"
+	grep -h '^#  *define OPENSSL_NO_' "$VENDORED" | sed 's/  */ /g' | grep -v -E "$IGNORE" | sort > "$WORK/vendored.no"
 	if ! cmp -s "$WORK/built.no" "$WORK/vendored.no"; then
 		echo "OPENSSL_NO_* feature set differs from the vendored configuration.h:" >&2
 		diff "$WORK/vendored.no" "$WORK/built.no" >&2 || true
