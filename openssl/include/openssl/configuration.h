@@ -28,7 +28,7 @@ extern "C" {
  */
 
 /* clang-format off */
-# ifndef OPENSSL_SYS_MACOSX
+# if defined(__APPLE__) && !defined(OPENSSL_SYS_MACOSX)
 #  define OPENSSL_SYS_MACOSX 1
 # endif
 # define OPENSSL_CONFIGURED_API 10100
@@ -244,7 +244,11 @@ extern "C" {
 #endif
 
 /* clang-format off */
-# define RC4_INT unsigned int
+# if defined(__arm__) || defined(__aarch64__) || defined(_M_ARM) || defined(_M_ARM64)
+#  define RC4_INT unsigned char
+# else
+#  define RC4_INT unsigned int
+# endif
 /* clang-format on */
 
 #if defined(OPENSSL_NO_COMP) || (defined(OPENSSL_NO_BROTLI) && defined(OPENSSL_NO_ZSTD) && defined(OPENSSL_NO_ZLIB))

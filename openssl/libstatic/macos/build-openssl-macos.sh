@@ -84,6 +84,12 @@ if [ "$REFRESH_HEADERS" = 1 ]; then
 	# configuration.h must not hard-code the word size of the machine that built it.
 	perl -0pi -e 's{#  (?:define|undef) BN_LLONG\n(?:.*\n){0,12}?#  (?:define|undef) THIRTY_TWO_BIT\n(?:\s*/\* clang-format on \*/\n)?}{#  if defined(_WIN64)\n#   undef BN_LLONG\n#   undef SIXTY_FOUR_BIT_LONG\n#   define SIXTY_FOUR_BIT\n#   undef THIRTY_TWO_BIT\n#  elif defined(__LP64__) || defined(_LP64)\n#   undef BN_LLONG\n#   define SIXTY_FOUR_BIT_LONG\n#   undef SIXTY_FOUR_BIT\n#   undef THIRTY_TWO_BIT\n#  else\n#   define BN_LLONG\n#   undef SIXTY_FOUR_BIT_LONG\n#   undef SIXTY_FOUR_BIT\n#   define THIRTY_TWO_BIT\n#  endif\n}' "$INC/configuration.h"
 	grep -q 'defined(_WIN64)' "$INC/configuration.h" || { echo "configuration.h word-size patch did not apply" >&2; exit 1; }
+	# Same reason: the platform macro must only apply on Apple, and RC4_INT (RC4_KEY layout)
+	# is "unsigned char" on ARM targets and "unsigned int" elsewhere.
+	perl -0pi -e 's{# ifndef OPENSSL_SYS_MACOSX\n#  define OPENSSL_SYS_MACOSX 1\n# endif\n}{# if defined(__APPLE__) && !defined(OPENSSL_SYS_MACOSX)\n#  define OPENSSL_SYS_MACOSX 1\n# endif\n}' "$INC/configuration.h"
+	perl -0pi -e 's{# define RC4_INT unsigned int\n}{# if defined(__arm__) || defined(__aarch64__) || defined(_M_ARM) || defined(_M_ARM64)\n#  define RC4_INT unsigned char\n# else\n#  define RC4_INT unsigned int\n# endif\n}' "$INC/configuration.h"
+	grep -q 'defined(__APPLE__) && !defined(OPENSSL_SYS_MACOSX)' "$INC/configuration.h" || { echo "configuration.h platform-macro patch did not apply" >&2; exit 1; }
+	grep -q 'defined(_M_ARM64)' "$INC/configuration.h" || { echo "configuration.h RC4_INT patch did not apply" >&2; exit 1; }
 	echo "==> Headers refreshed (OpenSSL $VERSION)"
 fi
 
