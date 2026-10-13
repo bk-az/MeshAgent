@@ -164,8 +164,12 @@ links the agent against the new libraries as a second check.
 - Running the per-platform script directly, from a matching *Native Tools* prompt, is also
   possible: `pwsh openssl\libstatic\build-openssl-windows.ps1 -Platform x64` (or `x86`, `ARM64`).
 
-The project files already link `Crypt32.lib`, `Bcrypt.lib` and `ws2_32.lib`, which is all
-OpenSSL 3+ needs; no project changes are required.
+No project changes are required: the `.vcxproj` files reference the libraries by their fixed
+names (`..\openssl\libstatic\libcrypto64MT.lib` and so on) and `..\openssl\include` for the
+headers, so a normal Visual Studio build picks up the new OpenSSL as soon as the files are
+replaced. OpenSSL 3 additionally needs `bcrypt.lib` for its random seeding; its
+`rand_win.c` pulls that in itself with `#pragma comment(lib, "bcrypt.lib")`, and `Crypt32.lib`
+and `ws2_32.lib` are already in the linker inputs.
 
 ### All of the above from GitHub Actions
 
