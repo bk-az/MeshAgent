@@ -7,7 +7,8 @@
   architecture matches -Platform. Perl must be on PATH (Strawberry Perl is fine); NASM is not
   needed because the libraries are built with no-asm, like the previous 1.1.1 ones.
 
-  Builds a release (/MT) and a debug (/MTd) variant and copies them over
+  Builds a release and a debug variant (both static, /MT /Zl, so the linking project's
+  /MT or /MTd setting decides the C runtime) and copies them over
     x64   -> libcrypto64MT.lib  libssl64MT.lib  libcrypto64MTd.lib  libssl64MTd.lib
     x86   -> libcrypto32MT.lib  libssl32MT.lib  libcrypto32MTd.lib  libssl32MTd.lib
     ARM64 -> libcryptoARM64.lib libsslARM64.lib libcryptoARM64d.lib libsslARM64d.lib
@@ -91,12 +92,12 @@ try {
 				if ($diff) { $diff | Format-Table | Out-String | Write-Host; throw "OPENSSL_NO_* feature set differs from the vendored configuration.h" }
 			}
 
-			# Static VC builds must carry the static CRT: LIBCMT for /MT, LIBCMTD for /MTd.
+			# OpenSSL compiles static libraries with /MT /Zl: /Zl strips the runtime-library
+			# directive from every object, so a correct build carries *no* LIBCMT/LIBCMTD directive
+			# and takes the CRT from the linking project (/MT or /MTd in the .vcxproj). Only a
+			# dynamic-runtime directive (MSVCRT / MSVCRTD) would indicate a wrong (/MD) build.
 			$directives = (& dumpbin /directives libcrypto.lib) -join "`n"
-			$hasMT  = $directives -match 'DEFAULTLIB:"?LIBCMT"?(\s|$)'
-			$hasMTd = $directives -match 'DEFAULTLIB:"?LIBCMTD"?'
-			if ($variant.Name -eq 'debug' -and -not $hasMTd) { throw "libcrypto.lib is not built with /MTd (no LIBCMTD directive)" }
-			if ($variant.Name -eq 'release' -and (-not $hasMT -or $hasMTd)) { throw "libcrypto.lib is not built with /MT (expected LIBCMT, not LIBCMTD)" }
+			if ($directives -match 'DEFAULTLIB:"?MSVCRTD?"?') { throw "libcrypto.lib references the dynamic CRT (MSVCRT); expected a static /MT /Zl build" }
 
 			Copy-Item libcrypto.lib (Join-Path $Here "libcrypto$($variant.Suffix).lib") -Force
 			Copy-Item libssl.lib    (Join-Path $Here "libssl$($variant.Suffix).lib")    -Force

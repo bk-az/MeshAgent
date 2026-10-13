@@ -111,10 +111,10 @@ powershell -ExecutionPolicy Bypass -File openssl\libstatic\build-openssl-windows
 
 The script finds Visual Studio with `vswhere`, loads the x64, x86 and ARM64 compiler
 environments in turn (x64-hosted cross compilers, so an x64 machine builds all three), and
-for every platform builds a release (`/MT`) and a debug (`/MTd`) variant of `libcrypto` and
-`libssl`. Each result is checked for the `LIBCMT` / `LIBCMTD` default-library directive (so a
-`/MD` build cannot slip in) and for the `OpenSSL <version>` banner before it overwrites the
-matching files:
+for every platform builds a release and a debug variant of `libcrypto` and `libssl` (static,
+`/MT /Zl`, so the project's `/MT` or `/MTd` setting decides the C runtime at link time). Each
+result is checked for the absence of a dynamic-runtime (`MSVCRT`) directive and for the
+`OpenSSL <version>` banner before it overwrites the matching files:
 
 | Platform | Files replaced in `openssl/libstatic` |
 |---|---|
