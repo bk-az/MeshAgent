@@ -155,6 +155,12 @@ links the agent against the new libraries as a second check.
 
 **Troubleshooting**
 
+- *`error LNK2019: unresolved external symbol __dtoul3_legacy`* (or another `__*3` helper) when
+  linking the agent: the OpenSSL objects were compiled by a newer MSVC toolset than the one the
+  project configuration uses. All configurations in the `-2022` projects use `v143`; if a
+  configuration was switched back to `v142`, either restore `v143` or rebuild the libraries from
+  a `vcvarsall ... -vcvars_ver=14.29` prompt.
+
 - *"vswhere.exe not found"* or *"No Visual Studio 2022 ... found"*: install the C++ workload
   listed above; a bare Visual Studio without C++ tools is not enough.
 - *"A native Windows Perl is required"*: `winget` is unavailable or was blocked; install
@@ -190,11 +196,12 @@ Work through these in order; each stage proves the one before it.
 
 ```sh
 # macOS / Linux: every line must print the same 3.x version, none may print 1.1.1
+# (only libcrypto embeds the banner; libssl is always rebuilt together with it)
 for f in $(find openssl/libstatic -name 'libcrypto*'); do printf '%-55s ' "$f"; strings "$f" | grep -m1 -o -E 'OpenSSL [0-9.]+[a-z]?'; echo; done
 ```
 ```powershell
 # Windows
-Get-ChildItem openssl\libstatic\*.lib | % { "{0,-24} {1}" -f $_.Name, (Select-String -Path $_ -Pattern 'OpenSSL [0-9.]+[a-z]?' | Select -First 1).Matches[0].Value }
+Get-ChildItem openssl\libstatic\libcrypto*.lib | % { "{0,-24} {1}" -f $_.Name, (Select-String -Path $_ -Pattern 'OpenSSL [0-9.]+[a-z]?' | Select -First 1).Matches[0].Value }
 ```
 `grep -m1 OPENSSL_VERSION_STR openssl/include/openssl/opensslv.h` must show the same version.
 

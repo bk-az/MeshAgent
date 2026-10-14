@@ -56,7 +56,7 @@ jobs:
       - name: Check embedded version banner
         shell: pwsh
         run: |
-          foreach ($f in Get-ChildItem ${{ matrix.files }}) {
+          foreach ($f in (Get-ChildItem ${{ matrix.files }} | Where-Object Name -like 'libcrypto*')) {   # libssl has no banner
             if (-not (Select-String -Path $f -Pattern "OpenSSL $env:OPENSSL_VERSION" -Quiet)) { throw "$f does not contain the OpenSSL $env:OPENSSL_VERSION banner" }
             Write-Host "$($f.Name): OpenSSL $env:OPENSSL_VERSION"
           }

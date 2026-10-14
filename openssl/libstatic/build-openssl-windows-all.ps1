@@ -14,6 +14,7 @@
     powershell -ExecutionPolicy Bypass -File openssl\libstatic\build-openssl-windows-all.ps1
     powershell -ExecutionPolicy Bypass -File openssl\libstatic\build-openssl-windows-all.ps1 -BuildAgent
     powershell -ExecutionPolicy Bypass -File openssl\libstatic\build-openssl-windows-all.ps1 -Platforms x64,x86
+    powershell -ExecutionPolicy Bypass -File openssl\libstatic\build-openssl-windows-all.ps1 -Platforms x86 -BuildAgent -SkipLibs
 
   ARM64 needs the "MSVC v143 - VS 2022 C++ ARM64/ARM64EC build tools" component; the script
   skips ARM64 with a warning if it is missing (the x64-hosted cross compiler is used, so no
@@ -26,6 +27,9 @@
 .PARAMETER BuildAgent
   After the libraries, build MeshAgent-2022.sln (Release) for each platform and verify the
   executables contain "OpenSSL <Version>".
+.PARAMETER SkipLibs
+  Do not rebuild the libraries (use the ones already in openssl\libstatic); useful with
+  -BuildAgent to re-run only the agent build after a project or source fix.
 .PARAMETER Tarball
   Already downloaded openssl-<Version>.tar.gz; downloaded once into %TEMP% otherwise.
 #>
@@ -34,6 +38,7 @@ param(
 	[string]$Version = '3.5.9',
 	[ValidateSet('x64', 'x86', 'ARM64')][string[]]$Platforms = @('x64', 'x86', 'ARM64'),
 	[switch]$BuildAgent,
+	[switch]$SkipLibs,
 	[string]$Tarball
 )
 $ErrorActionPreference = 'Stop'
@@ -97,7 +102,7 @@ function Ensure-Perl {
 }
 
 # ---------------------------------------------------------------- tarball (downloaded once)
-if (-not $Tarball) {
+if (-not $Tarball -and -not $SkipLibs) {
 	$Tarball = Join-Path $env:TEMP "openssl-$Version.tar.gz"
 	if (-not (Test-Path $Tarball)) {
 		Write-Host "Downloading openssl-$Version.tar.gz to $Tarball"
@@ -110,6 +115,7 @@ if (-not $Tarball) {
 $results = [ordered]@{}
 $baseEnv = Save-Environment
 foreach ($p in $Platforms) {
+	if ($SkipLibs) { $results[$p] = 'libs kept'; continue }
 	if ($p -eq 'ARM64' -and -not $hasArm64) {
 		Write-Warning "ARM64 build tools are not installed (VS Installer: 'MSVC v143 - VS 2022 C++ ARM64/ARM64EC build tools'); skipping ARM64"
 		$results[$p] = 'skipped (no ARM64 toolchain)'
@@ -134,7 +140,7 @@ foreach ($p in $Platforms) {
 if ($BuildAgent) {
 	$sln = Join-Path $Repo 'MeshAgent-2022.sln'
 	foreach ($p in $Platforms) {
-		if ($results[$p] -ne 'built') { continue }
+		if ($results[$p] -ne 'built' -and $results[$p] -ne 'libs kept') { continue }
 		Write-Host ""
 		Write-Host "=================== MeshAgent Release|$p ==================="
 		try {
@@ -149,10 +155,10 @@ if ($BuildAgent) {
 					Write-Host "$($exe.Name): OpenSSL $Version"
 				} else { throw "$($exe.Name) does not contain the 'OpenSSL $Version' banner" }
 			}
-			$results[$p] = 'built, agent verified'
+			$results[$p] = "$($results[$p]), agent verified"
 		} catch {
 			Write-Warning "$p agent build failed: $_"
-			$results[$p] = "built, agent FAILED: $_"
+			$results[$p] = "$($results[$p]), agent FAILED: $_"
 		} finally {
 			Restore-Environment $baseEnv
 		}
@@ -169,8 +175,13 @@ foreach ($k in $results.Keys) {
 }
 Write-Host ""
 Write-Host "Libraries are in $Here (libcrypto*.lib / libssl*.lib). Commit them together with the headers."
+# Only libcrypto embeds the version banner; libssl is reported by its modification time.
 foreach ($f in Get-ChildItem (Join-Path $Here '*.lib')) {
-	$banner = if (Select-String -Path $f.FullName -Pattern "OpenSSL $Version" -Quiet) { "OpenSSL $Version" } else { "OLD VERSION" }
-	Write-Host ("  {0,-24} {1}" -f $f.Name, $banner)
+	if ($f.Name -like 'libcrypto*') {
+		$state = if (Select-String -Path $f.FullName -Pattern "OpenSSL $Version" -Quiet) { "OpenSSL $Version" } else { "OLD VERSION" }
+	} else {
+		$state = "no banner in libssl; written $($f.LastWriteTime.ToString('yyyy-MM-dd HH:mm'))"
+	}
+	Write-Host ("  {0,-24} {1}" -f $f.Name, $state)
 }
 if ($failed) { exit 1 }
