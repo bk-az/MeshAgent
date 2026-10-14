@@ -593,7 +593,12 @@ static CRITICAL_SECTION g_ILibCrypto_winRootLock;
 // windows variant for a lazy CApath lookup. The same subject can appear more than once in the
 // ROOT store (renewed roots keep the subject but change the key), so walk every match and cache
 // them all in the store -- like OpenSSL's own hash_dir lookup -- and let the verifier pick by key.
+// OpenSSL 3.0 made the subject parameter of X509_LOOKUP_get_by_subject_fn const.
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+static int ILibCrypto_WinGetBySubject(X509_LOOKUP *lu, X509_LOOKUP_TYPE type, const X509_NAME *name, X509_OBJECT *ret)
+#else
 static int ILibCrypto_WinGetBySubject(X509_LOOKUP *lu, X509_LOOKUP_TYPE type, X509_NAME *name, X509_OBJECT *ret)
+#endif
 {
 	const unsigned char *der = NULL;
 	size_t derLen = 0;

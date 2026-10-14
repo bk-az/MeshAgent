@@ -37,6 +37,9 @@ so the tree still builds against OpenSSL 1.1.1 headers (upstream) and merges sta
 5. `microstack/ILibCrypto.c` `util_mkCertEx()`: on 4.0+ the subject name is built in a
    fresh `X509_NAME` and set with `X509_set_subject_name()`, because
    `X509_get_subject_name()` returns a `const` pointer since 4.0.
+6. `microstack/ILibCrypto.c` `ILibCrypto_WinGetBySubject()` (Windows certificate-store
+   lookup): the `X509_LOOKUP_get_by_subject_fn` callback takes a `const X509_NAME *` since
+   3.0, so the parameter is declared `const` on 3.0+ (MSVC warned C4028/C4090 otherwise).
 
 Items 3 and 5 are only *active* when building against 4.x headers; with the vendored
 3.5 headers the code compiles exactly as it did before. They are kept so the tree builds
