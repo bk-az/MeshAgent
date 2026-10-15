@@ -2125,7 +2125,17 @@ int ILibDuktape_TLS_verify(int preverify_ok, X509_STORE_CTX *storectx)
 		ILibDuktape_TLS_X509_PUSH(data->ctx, sk_X509_value(certChain, i));					// [Socket][Options][func][this][certs][cert]
 		duk_put_prop_index(data->ctx, -2, i);												// [Socket][Options][func][this][certs]
 	}
-	retVal = duk_pcall_method(data->ctx, 1) == 0 ? 1 : 0;									// [Socket][Options][undefined]
+	if (duk_pcall_method(data->ctx, 1) == 0)												// [Socket][Options][undefined/error]
+	{
+		retVal = 1;
+	}
+	else
+	{
+		// Make a rejected server certificate visible instead of silently failing the handshake
+		ILibRemoteLogging_printf(ILibChainGetLogger(Duktape_GetChain(data->ctx)), ILibRemoteLogging_Modules_Microstack_Generic | ILibRemoteLogging_Modules_ConsolePrint,
+			ILibRemoteLogging_Flags_VerbosityLevel_1, "TLS: checkServerIdentity rejected the server certificate (%d cert(s) in chain, preverify=%d): %s",
+			sk_X509_num(certChain), preverify_ok, (char*)duk_safe_to_string(data->ctx, -1));
+	}
 	duk_pop_3(data->ctx);																	// ...
 
 	return retVal;
