@@ -144,6 +144,7 @@ typedef enum CERTIFICATE_TYPES
 void  __fastcall util_openssl_init();
 void  __fastcall util_openssl_uninit();
 int  __fastcall util_load_system_certs(SSL_CTX *ctx);
+void util_tlsdebug_verify(const char *who, int preverify_ok, X509_STORE_CTX *ctx, int result); // logs one verify-callback call when tlsDebug is on
 void  __fastcall util_free(char* ptr);
 
 // Certificate & crypto methods

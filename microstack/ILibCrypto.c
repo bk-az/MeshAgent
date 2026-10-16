@@ -21,6 +21,7 @@ limitations under the License.
 
 
 #include "ILibCrypto.h"
+#include "ILibTLSDebug.h"
 
 #ifndef MICROSTACK_NOTLS
 #include <openssl/pem.h>
@@ -608,8 +609,18 @@ static int ILibCrypto_WinGetBySubject(X509_LOOKUP *lu, X509_LOOKUP_TYPE type, X5
 	X509 *x, *keep = NULL;
 	int ok = 0;
 
+	ULONGLONG tlsDebugStart = 0;
+	int tlsDebugMatches = 0;
+	char tlsDebugName[256];
+
 	if (type != X509_LU_X509 || name == NULL || g_ILibCrypto_winRoot == NULL) { return 0; }
 	if (X509_NAME_get0_der(name, &der, &derLen) != 1 || der == NULL) { return 0; }
+	if (ILibTLSDebug_Level > 0)
+	{
+		X509_NAME_oneline(name, tlsDebugName, (int)sizeof(tlsDebugName));
+		ILibTLSDebug_printf("Windows ROOT store lookup start: %s", tlsDebugName);
+		tlsDebugStart = GetTickCount64();
+	}
 
 	blob.cbData = (DWORD)derLen;
 	blob.pbData = (BYTE*)der;
@@ -622,6 +633,7 @@ static int ILibCrypto_WinGetBySubject(X509_LOOKUP *lu, X509_LOOKUP_TYPE type, X5
 		if ((x = d2i_X509(NULL, &p, wctx->cbCertEncoded)) != NULL)
 		{
 			if (cache != NULL) { X509_STORE_add_cert(cache, x); }	// takes its own reference
+			++tlsDebugMatches;
 			if (keep != NULL) { X509_free(keep); }
 			keep = x;
 		}
@@ -633,6 +645,10 @@ static int ILibCrypto_WinGetBySubject(X509_LOOKUP *lu, X509_LOOKUP_TYPE type, X5
 	{
 		ok = X509_OBJECT_set1_X509(ret, keep);		// takes its own reference
 		X509_free(keep);
+	}
+	if (ILibTLSDebug_Level > 0)
+	{
+		ILibTLSDebug_printf("Windows ROOT store lookup done in %llu ms: %d match(es), result %d: %s", (unsigned long long)(GetTickCount64() - tlsDebugStart), tlsDebugMatches, ok, tlsDebugName);
 	}
 	return ok;
 }
@@ -654,6 +670,7 @@ static BOOL CALLBACK ILibCrypto_BuildCertStore(PINIT_ONCE once, PVOID param, PVO
 	InitializeCriticalSection(&g_ILibCrypto_winRootLock);
 	if ((g_ILibCrypto_winRoot = CertOpenSystemStoreW(0, L"ROOT")) == NULL)
 	{
+		ILibTLSDebug(1, "trust store: CertOpenSystemStore(ROOT) failed, error %lu, using an empty store", (unsigned long)GetLastError());
 		g_ILibCrypto_certStore = store;
 		return TRUE;
 	}
@@ -664,6 +681,7 @@ static BOOL CALLBACK ILibCrypto_BuildCertStore(PINIT_ONCE once, PVOID param, PVO
 		if (X509_LOOKUP_meth_set_get_by_subject(method, ILibCrypto_WinGetBySubject) == 1 &&
 			X509_STORE_add_lookup(store, method) != NULL)
 		{
+			ILibTLSDebug(1, "trust store: Windows ROOT store attached with on-demand lookup");
 			g_ILibCrypto_certStore = store;
 			return TRUE;
 		}
@@ -684,6 +702,7 @@ static BOOL CALLBACK ILibCrypto_BuildCertStore(PINIT_ONCE once, PVOID param, PVO
 	}
 	CertCloseStore(g_ILibCrypto_winRoot, 0);
 	g_ILibCrypto_winRoot = NULL;
+	ILibTLSDebug(1, "trust store: Windows ROOT store copied in (%d objects)", sk_X509_OBJECT_num(X509_STORE_get0_objects(store)));
 	g_ILibCrypto_certStore = store;
 	return TRUE;
 }
@@ -945,12 +964,34 @@ int __fastcall util_load_system_certs(SSL_CTX *ctx)
 	if (g_ILibCrypto_certStore != NULL && X509_STORE_up_ref(g_ILibCrypto_certStore) == 1)
 	{
 		SSL_CTX_set_cert_store(ctx, g_ILibCrypto_certStore);
+		ILibTLSDebug(2, "ctx=%p uses the shared trust store %p", (void*)ctx, (void*)g_ILibCrypto_certStore);
 	}
 	else
 	{
 		SSL_CTX_set_default_verify_paths(ctx);
+		ILibTLSDebug(1, "ctx=%p shared trust store unavailable, using OpenSSL default verify paths", (void*)ctx);
 	}
 	return 0;
+}
+
+// One line per certificate-verify callback: what OpenSSL concluded and what the agent decided
+void util_tlsdebug_verify(const char *who, int preverify_ok, X509_STORE_CTX *ctx, int result)
+{
+	char subject[256], issuer[256];
+	X509 *cert;
+	int err;
+
+	if (ILibTLSDebug_Level <= 0 || ctx == NULL) { return; }
+	cert = X509_STORE_CTX_get_current_cert(ctx);
+	err = X509_STORE_CTX_get_error(ctx);
+	subject[0] = issuer[0] = 0;
+	if (cert != NULL)
+	{
+		X509_NAME_oneline(X509_get_subject_name(cert), subject, (int)sizeof(subject));
+		X509_NAME_oneline(X509_get_issuer_name(cert), issuer, (int)sizeof(issuer));
+	}
+	ILibTLSDebug_printf("verify[%s] depth=%d preverify=%d openssl=%d (%s) -> agent returns %d | subject=%s | issuer=%s",
+		who, X509_STORE_CTX_get_error_depth(ctx), preverify_ok, err, X509_verify_cert_error_string(err), result, subject, issuer);
 }
 
 // Add extension using V3 code: we can set the config file as NULL because we wont reference any other sections.

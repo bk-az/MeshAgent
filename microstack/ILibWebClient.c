@@ -3557,6 +3557,7 @@ static int ILibWebClient_Https_AuthenticateServer(int preverify_ok, X509_STORE_C
 		retVal = wcdo->Parent->OnHttpsConnection(token, preverify_ok, certChain, &(wcdo->remote), wcdo->Parent->OnHttpsConnectionData);
 		//sk_X509_free(certChain);
 	}
+	util_tlsdebug_verify("webclient", preverify_ok, ctx, retVal);
 	SSL_TRACE2("ILibWebClient_Https_AuthenticateServer()");
 
 	return retVal;
@@ -3585,7 +3586,7 @@ int ILibWebClient_EnableHTTPS(ILibWebClient_RequestManager manager, struct util_
 		return 1;
 	}
 
-	SSL_CTX_set_options(ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1);
+	SSL_CTX_set_options(ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1);
 	if (leafCert != NULL)
 	{
 		SSL_CTX_use_certificate(ctx, leafCert->x509);

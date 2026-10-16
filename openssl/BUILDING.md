@@ -40,6 +40,14 @@ so the tree still builds against OpenSSL 1.1.1 headers (upstream) and merges sta
 6. `microstack/ILibCrypto.c` `ILibCrypto_WinGetBySubject()` (Windows certificate-store
    lookup): the `X509_LOOKUP_get_by_subject_fn` callback takes a `const X509_NAME *` since
    3.0, so the parameter is declared `const` on 3.0+ (MSVC warned C4028/C4090 otherwise).
+7. `SSL_CTX_set_options()` calls in `microstack/ILibWebClient.c`, `microstack/ILibWebServer.c`
+   and `microscript/ILibDuktape_net.c` no longer pass `SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER |
+   SSL_MODE_ENABLE_PARTIAL_WRITE`. Those are *mode* flags (values 0x2 and 0x1) and were never
+   applied as modes; in 1.1.1 the same option bits were unused, but since OpenSSL 3.0 they mean
+   `SSL_OP_CLEANSE_PLAINTEXT` and `SSL_OP_NO_EXTENDED_MASTER_SECRET`, so every TLS connection
+   silently disabled the Extended Master Secret extension. Dropping them restores the exact
+   1.1.1 behaviour. They are deliberately not moved to `SSL_CTX_set_mode()`: the send path
+   ignores `SSL_write()`'s return value, which is only safe without partial writes.
 
 Items 3 and 5 are only *active* when building against 4.x headers; with the vendored
 3.5 headers the code compiles exactly as it did before. They are kept so the tree builds
@@ -240,6 +248,38 @@ reconnects after `kickstart`/service restart.
 extract the agent executable from it, and repeat step 3 on *that* file. The finding is closed
 only when the file customers download reports the new version. Keep the build date and OpenSSL
 version in the release notes / asset inventory as the report's remediation asks.
+
+## Debugging TLS problems
+
+The agent has an opt-in TLS trace. Add one line to the agent's `.msh` (next to the
+executable) and restart it; the value is read on every control-channel connect:
+
+```
+tlsDebug=1      # connection events, certificate checks, errors, close reasons
+tlsDebug=2      # additionally every handshake state and every recv/SSL_read/SSL_write
+```
+
+Lines are timestamped to the millisecond, carry the thread id, and are written both to the
+console (`<agent> run`) and to `<agent>.tls.log` next to the executable, so the trace also
+works when the agent runs as a service. Each connection is identified by `sock=` and `ssl=`
+pointers, so the lifecycle of a single relay tunnel can be followed with a search.
+
+What it records:
+
+- at startup: OpenSSL version and platform, `OPENSSLDIR`, `OPENSSL_CONF`, and whether the
+  default `openssl.cnf` exists (OpenSSL 3 loads it automatically, 1.1.1 builds did not
+  depend on it in the same way);
+- TCP connect (and proxy), TCP connected, socket errors;
+- TLS setup with peer address and SNI, handshake start/done with protocol and cipher,
+  alerts sent or received, and failures with the full OpenSSL error queue;
+- every certificate-verify callback for the control channel (`verify[webclient]`) and for
+  relay tunnels (`verify[tunnel/...]`, including how long `checkServerIdentity` took), and
+  every Windows ROOT store lookup with its duration;
+- `tls.connect()` calls from the JavaScript core and what was handed back to it
+  (`secureConnect`, `error`, disconnect);
+- every close path with its reason.
+
+Remove the line again afterwards: level 2 writes several lines per packet.
 
 ## Upgrading to a newer OpenSSL
 

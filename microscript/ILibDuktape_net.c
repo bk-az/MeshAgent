@@ -26,6 +26,7 @@ limitations under the License.
 #include "microstack/ILibCrypto.h"
 #include "microstack/ILibAsyncServerSocket.h"
 #include "microstack/ILibRemoteLogging.h"
+#include "microstack/ILibTLSDebug.h"
 #include "microstack/ILibProcessPipe.h"
 
 #ifdef _POSIX
@@ -229,6 +230,7 @@ void ILibDuktape_net_socket_OnConnect(ILibAsyncSocket_SocketModule socketModule,
 			duk_push_string(ptrs->ctx, SSL_get_servername(ptrs->ssl, TLSEXT_NAMETYPE_host_name));
 			duk_put_prop_string(ptrs->ctx, -2, "servername");
 
+			ILibTLSDebug(1, "sock=%p ssl=%p emitting secureConnect to JavaScript (alpn=%.*s)", (void*)socketModule, (void*)ptrs->ssl, alpnLen != 0 ? (int)alpnLen : 1, alpnLen != 0 ? (const char*)alpn : "-");
 			duk_get_prop_string(ptrs->ctx, -1, "emit");									// [socket][emit]
 			duk_swap_top(ptrs->ctx, -2);												// [emit][this]
 			duk_push_string(ptrs->ctx, "secureConnect");								// [emit][this][secureConnect]
@@ -252,6 +254,7 @@ void ILibDuktape_net_socket_OnConnect(ILibAsyncSocket_SocketModule socketModule,
 		duk_push_string(ptrs->ctx, "error");						// [emit][this][error]
 		duk_push_object(ptrs->ctx);									// [emit][this][error][errorObj]
 #ifndef MICROSTACK_NOTLS
+		if (ptrs->ssl != NULL) { ILibTLSDebug(1, "sock=%p ssl=%p emitting error to JavaScript: %s", (void*)socketModule, (void*)ptrs->ssl, ILibAsyncSocket_TLS_WasHandshakeError(socketModule) ? "TLS Handshake Error" : "Connection Failed"); }
 		if (ptrs->ssl != NULL && ILibAsyncSocket_TLS_WasHandshakeError(socketModule))
 		{
 			duk_push_string(ptrs->ctx, "TLS Handshake Error");		// [emit][this][error][errorObj][msg]
@@ -271,6 +274,9 @@ void ILibDuktape_net_socket_OnConnect(ILibAsyncSocket_SocketModule socketModule,
 void ILibDuktape_net_socket_OnDisconnect(ILibAsyncSocket_SocketModule socketModule, void *user)
 {
 	ILibDuktape_net_socket *ptrs = (ILibDuktape_net_socket*)((ILibChain_Link*)socketModule)->ExtraMemoryPtr;
+#ifndef MICROSTACK_NOTLS
+	if (ptrs->ssl != NULL) { ILibTLSDebug(1, "sock=%p ssl=%p disconnected, notifying JavaScript", (void*)socketModule, (void*)ptrs->ssl); }
+#endif
 	if (ILibMemory_CanaryOK(ptrs->emitter))
 	{
 		duk_push_heapptr(ptrs->ctx, ptrs->object);			// [sock]
@@ -2113,9 +2119,10 @@ int ILibDuktape_TLS_verify(int preverify_ok, X509_STORE_CTX *storectx)
 
 	duk_push_heapptr(data->ctx, data->object);												// [Socket]
 	duk_get_prop_string(data->ctx, -1, ILibDuktape_SOCKET2OPTIONS);							// [Socket][Options]
-	if (Duktape_GetBooleanProperty(data->ctx, -1, "rejectUnauthorized", 1) && preverify_ok != 1) { duk_pop_2(data->ctx); return(preverify_ok); }
+	if (Duktape_GetBooleanProperty(data->ctx, -1, "rejectUnauthorized", 1) && preverify_ok != 1) { duk_pop_2(data->ctx); util_tlsdebug_verify("tunnel/rejectUnauthorized", preverify_ok, storectx, preverify_ok); return(preverify_ok); }
 	void *OnVerify = Duktape_GetHeapptrProperty(data->ctx, -1, "checkServerIdentity");
-	if (OnVerify == NULL) { duk_pop_2(data->ctx); return(1); }
+	if (OnVerify == NULL) { duk_pop_2(data->ctx); util_tlsdebug_verify("tunnel/no-check", preverify_ok, storectx, 1); return(1); }
+	long long tlsDebugStart = ILibTLSDebug_Level > 0 ? ILibGetUptime() : 0;
 
 	duk_push_heapptr(data->ctx, OnVerify);													// [Socket][Options][func]
 	duk_push_heapptr(data->ctx, data->object);												// [Socket][Options][func][this]
@@ -2128,6 +2135,7 @@ int ILibDuktape_TLS_verify(int preverify_ok, X509_STORE_CTX *storectx)
 	if (duk_pcall_method(data->ctx, 1) == 0)												// [Socket][Options][undefined/error]
 	{
 		retVal = 1;
+		ILibTLSDebug(1, "sock=%p checkServerIdentity accepted the server certificate in %lld ms (%d cert(s) in chain)", (void*)data->socketModule, ILibGetUptime() - tlsDebugStart, sk_X509_num(certChain));
 	}
 	else
 	{
@@ -2135,7 +2143,9 @@ int ILibDuktape_TLS_verify(int preverify_ok, X509_STORE_CTX *storectx)
 		ILibRemoteLogging_printf(ILibChainGetLogger(Duktape_GetChain(data->ctx)), ILibRemoteLogging_Modules_Microstack_Generic | ILibRemoteLogging_Modules_ConsolePrint,
 			ILibRemoteLogging_Flags_VerbosityLevel_1, "TLS: checkServerIdentity rejected the server certificate (%d cert(s) in chain, preverify=%d): %s",
 			sk_X509_num(certChain), preverify_ok, (char*)duk_safe_to_string(data->ctx, -1));
+		ILibTLSDebug(1, "sock=%p checkServerIdentity REJECTED the server certificate after %lld ms: %s", (void*)data->socketModule, ILibGetUptime() - tlsDebugStart, (char*)duk_safe_to_string(data->ctx, -1));
 	}
+	util_tlsdebug_verify("tunnel/checkServerIdentity", preverify_ok, storectx, retVal);
 	duk_pop_3(data->ctx);																	// ...
 
 	return retVal;
@@ -2522,6 +2532,9 @@ duk_ret_t ILibDuktape_TLS_connect(duk_context *ctx)
 	duk_size_t hostLen;
 	char *host = Duktape_GetStringPropertyValueEx(ctx, 0, "host", "127.0.0.1", &hostLen);
 	char *sniname = Duktape_GetStringPropertyValue(ctx, 0, "servername", host);
+	ILibTLSDebug(1, "sock=%p tls.connect(%s:%d) sni=%s rejectUnauthorized=%d checkServerIdentity=%s proxy=%s", (void*)data->socketModule, host,
+		Duktape_GetIntPropertyValue(ctx, 0, "port", 0), sniname != NULL ? sniname : "-", Duktape_GetBooleanProperty(ctx, 0, "rejectUnauthorized", 1),
+		duk_has_prop_string(ctx, 0, "checkServerIdentity") ? "yes" : "no", duk_has_prop_string(ctx, 0, "proxy") ? "yes" : "no");
 	int port = Duktape_GetIntPropertyValue(ctx, 0, "port", 0);
 	struct sockaddr_in6 dest;
 	struct sockaddr_in6 proxy;
@@ -2645,62 +2658,62 @@ duk_ret_t ILibDuktape_TLS_createSecureContext(duk_context *ctx)
 	if (secureProtocolLen == 13 && strncmp(secureProtocol, "SSLv23_method", 13) == 0)
 	{
 		ssl_ctx = SSL_CTX_new(TLS_method());
-		SSL_CTX_set_options(ssl_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1);
+		SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1);
 	}
 	else if (secureProtocolLen == 20 && strncmp(secureProtocol, "SSLv23_client_method", 20) == 0)
 	{
 		ssl_ctx = SSL_CTX_new(TLS_method());
-		SSL_CTX_set_options(ssl_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1);
+		SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1);
 	}
 	else if (secureProtocolLen == 20 && strncmp(secureProtocol, "SSLv23_server_method", 20) == 0)
 	{
 		ssl_ctx = SSL_CTX_new(TLS_method());
-		SSL_CTX_set_options(ssl_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1);
+		SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1);
 	}
 	else if (secureProtocolLen == 12 && strncmp(secureProtocol, "TLSv1_method", 12) == 0)
 	{
 		ssl_ctx = SSL_CTX_new(TLS_method());
-		SSL_CTX_set_options(ssl_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1_1 | SSL_OP_NO_TLSv1_2);
+		SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1_1 | SSL_OP_NO_TLSv1_2);
 	}
 	else if (secureProtocolLen == 19 && strncmp(secureProtocol, "TLSv1_client_method", 19) == 0)
 	{
 		ssl_ctx = SSL_CTX_new(TLS_method());
-		SSL_CTX_set_options(ssl_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1_1 | SSL_OP_NO_TLSv1_2);
+		SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1_1 | SSL_OP_NO_TLSv1_2);
 	}
 	else if (secureProtocolLen == 19 && strncmp(secureProtocol, "TLSv1_server_method", 19) == 0)
 	{
 		ssl_ctx = SSL_CTX_new(TLS_method());
-		SSL_CTX_set_options(ssl_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1_1 | SSL_OP_NO_TLSv1_2);
+		SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1_1 | SSL_OP_NO_TLSv1_2);
 	}
 	else if (secureProtocolLen == 14 && strncmp(secureProtocol, "TLSv1_1_method", 14) == 0)
 	{
 		ssl_ctx = SSL_CTX_new(TLS_method());
-		SSL_CTX_set_options(ssl_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_2);
+		SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_2);
 	}
 	else if (secureProtocolLen == 21 && strncmp(secureProtocol, "TLSv1_1_client_method", 21) == 0)
 	{
 		ssl_ctx = SSL_CTX_new(TLS_method());
-		SSL_CTX_set_options(ssl_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_2);
+		SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_2);
 	}
 	else if (secureProtocolLen == 21 && strncmp(secureProtocol, "TLSv1_1_server_method", 21) == 0)
 	{
 		ssl_ctx = SSL_CTX_new(TLS_method());
-		SSL_CTX_set_options(ssl_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_2);
+		SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_2);
 	}
 	else if (secureProtocolLen == 14 && strncmp(secureProtocol, "TLSv1_2_method", 14) == 0)
 	{
 		ssl_ctx = SSL_CTX_new(TLS_method());
-		SSL_CTX_set_options(ssl_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_1);
+		SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_1);
 	}
 	else if (secureProtocolLen == 21 && strncmp(secureProtocol, "TLSv1_2_client_method", 21) == 0)
 	{
 		ssl_ctx = SSL_CTX_new(TLS_method());
-		SSL_CTX_set_options(ssl_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_1);
+		SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_1);
 	}
 	else if (secureProtocolLen == 21 && strncmp(secureProtocol, "TLSv1_2_server_method", 21) == 0)
 	{
 		ssl_ctx = SSL_CTX_new(TLS_method());
-		SSL_CTX_set_options(ssl_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_1);
+		SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_1);
 	}
 	else if (secureProtocolLen == 11 && strncmp(secureProtocol, "DTLS_method", 11) == 0)
 	{

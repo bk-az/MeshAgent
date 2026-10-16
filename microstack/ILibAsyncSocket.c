@@ -46,6 +46,7 @@ limitations under the License.
 #include "ILibParsers.h"
 #include "ILibAsyncSocket.h"
 #include "ILibRemoteLogging.h"
+#include "ILibTLSDebug.h"
 
 #ifdef _DEBUG
 #include "ILibCrypto.h"
@@ -211,6 +212,75 @@ void ILibAsyncSocket_PostSelect(void* object,int slct, fd_set *readset, fd_set *
 void ILibAsyncSocket_PreSelect(void* object,fd_set *readset, fd_set *writeset, fd_set *errorset, int* blocktime);
 const int ILibMemory_ASYNCSOCKET_CONTAINERSIZE = (const int)sizeof(ILibAsyncSocketModule);
 
+#ifndef MICROSTACK_NOTLS
+// ---- Opt-in TLS trace helpers ("tlsDebug=1|2", see ILibTLSDebug.h) ----
+static const char* ILibAsyncSocket_TLSDebug_ErrName(int e)
+{
+	switch (e)
+	{
+		case SSL_ERROR_NONE: return("NONE");
+		case SSL_ERROR_SSL: return("SSL");
+		case SSL_ERROR_WANT_READ: return("WANT_READ");
+		case SSL_ERROR_WANT_WRITE: return("WANT_WRITE");
+		case SSL_ERROR_WANT_X509_LOOKUP: return("WANT_X509_LOOKUP");
+		case SSL_ERROR_SYSCALL: return("SYSCALL");
+		case SSL_ERROR_ZERO_RETURN: return("ZERO_RETURN");
+		case SSL_ERROR_WANT_CONNECT: return("WANT_CONNECT");
+		case SSL_ERROR_WANT_ACCEPT: return("WANT_ACCEPT");
+		default: return("OTHER");
+	}
+}
+static char* ILibAsyncSocket_TLSDebug_Addr(struct sockaddr_in6 *a, char *buf, size_t bufLen)
+{
+	char addr[64];
+	addr[0] = 0;
+	if (a->sin6_family == AF_INET || a->sin6_family == AF_INET6)
+	{
+		if (ILibInet_ntop2((struct sockaddr*)a, addr, sizeof(addr)) == NULL) { addr[0] = 0; }
+		snprintf(buf, bufLen, "%s:%u", addr, (unsigned int)ntohs(((struct sockaddr_in*)a)->sin_port));
+	}
+	else
+	{
+		snprintf(buf, bufLen, "family=%d", (int)a->sin6_family);
+	}
+	return(buf);
+}
+static int ILibAsyncSocket_TLSDebug_ErrCB(const char *str, size_t len, void *u)
+{
+	if (len > 0 && str[len - 1] == '\n') { --len; }
+	ILibTLSDebug_printf("sock=%p   openssl error: %.*s", u, (int)len, str);
+	return(1);
+}
+// Logs (and clears) the OpenSSL error queue; only called where the operation already failed
+static void ILibAsyncSocket_TLSDebug_Errors(void *sock)
+{
+	if (ILibTLSDebug_Level > 0) { ERR_print_errors_cb(ILibAsyncSocket_TLSDebug_ErrCB, sock); }
+}
+static void ILibAsyncSocket_TLSDebug_InfoCallback(const SSL *ssl, int where, int ret)
+{
+	if (where & SSL_CB_ALERT)
+	{
+		ILibTLSDebug(1, "ssl=%p alert %s: %s / %s", (void*)ssl, (where & SSL_CB_READ) ? "RECEIVED" : "SENT", SSL_alert_type_string_long(ret), SSL_alert_desc_string_long(ret));
+	}
+	else if (where & SSL_CB_HANDSHAKE_START)
+	{
+		ILibTLSDebug(1, "ssl=%p handshake start", (void*)ssl);
+	}
+	else if (where & SSL_CB_HANDSHAKE_DONE)
+	{
+		ILibTLSDebug(1, "ssl=%p handshake done: %s, %s%s", (void*)ssl, SSL_get_version(ssl), SSL_get_cipher_name(ssl), SSL_session_reused((SSL*)ssl) ? ", session resumed" : "");
+	}
+	else if ((where & SSL_CB_EXIT) && ret == 0)
+	{
+		ILibTLSDebug(1, "ssl=%p handshake failed in state: %s", (void*)ssl, SSL_state_string_long(ssl));
+	}
+	else if (where & SSL_CB_LOOP)
+	{
+		ILibTLSDebug(2, "ssl=%p state: %s", (void*)ssl, SSL_state_string_long(ssl));
+	}
+}
+#endif
+
 typedef enum ILibAsyncSocket_TLSPlainText_ContentType
 {
 	ILibAsyncSocket_TLSPlainText_ContentType_ChangeCipherSpec = 20,
@@ -368,6 +438,7 @@ void ILibAsyncSocket_Destroy(void *socketModule)
 	// If this is an SSL socket, free the SSL state
 	if (module->ssl != NULL)
 	{
+		ILibTLSDebug(1, "sock=%p ssl=%p freed by Destroy (handshakeDone=%d)", (void*)module, (void*)module->ssl, module->TLSHandshakeCompleted);
 		SSL_TRACE1("SSL_free()");
 		SSL_free(module->ssl); // Frees SSL session and BIO buffer at the same time
 		module->ssl = NULL;
@@ -571,7 +642,21 @@ ILibAsyncSocket_SendStatus ILibAsyncSocket_SendTo_MultiWrite(ILibAsyncSocket_Soc
 			}
 
 			SSL_TRACE1("SSL_write()");
-			SSL_write(module->ssl, buffer, (int)bufferLen); // No dataloss, becuase we capped at INT32_MAX
+			{
+				int written = SSL_write(module->ssl, buffer, (int)bufferLen); // No dataloss, becuase we capped at INT32_MAX
+				if (ILibTLSDebug_Level > 0)
+				{
+					if (written != (int)bufferLen)
+					{
+						ILibTLSDebug_printf("sock=%p ssl=%p SSL_write(%d bytes) returned %d (%s)", (void*)module, (void*)module->ssl, (int)bufferLen, written, ILibAsyncSocket_TLSDebug_ErrName(SSL_get_error(module->ssl, written)));
+						ILibAsyncSocket_TLSDebug_Errors(module);
+					}
+					else
+					{
+						ILibTLSDebug(2, "sock=%p ssl=%p SSL_write %d bytes, %d encrypted bytes now pending", (void*)module, (void*)module->ssl, (int)bufferLen, (int)module->writeBioBuffer->length);
+					}
+				}
+			}
 			SSL_TRACE2("SSL_write()");
 			TLSLOG1("SSL_write[%d]: %d bytes...\n", module->internalSocket, bufferLen);
 
@@ -808,6 +893,9 @@ void ILibAsyncSocket_Disconnect(ILibAsyncSocket_SocketModule socketModule)
 	if (module == NULL) { return; }
 
 	ILibRemoteLogging_printf(ILibChainGetLogger(module->Transport.ChainLink.ParentChain), ILibRemoteLogging_Modules_Microstack_AsyncSocket, ILibRemoteLogging_Flags_VerbosityLevel_1, "AsyncSocket[%p] << DISCONNECT", (void*)module);
+#ifndef MICROSTACK_NOTLS
+	if (module->ssl != NULL) { ILibTLSDebug(1, "sock=%p ssl=%p closed locally by Disconnect() (handshakeDone=%d)", (void*)module, (void*)module->ssl, module->TLSHandshakeCompleted); }
+#endif
 
 	ILibSpinLock_Lock(&(module->SendLock));
 	module->timeout_handler = NULL;
@@ -995,6 +1083,23 @@ void ILibAsyncSocket_ConnectTo(void* socketModule, struct sockaddr *localInterfa
 #endif
 
 	// Connect the socket, and force the chain to unblock, since the select statement doesn't have us in the fdset yet.
+#ifndef MICROSTACK_NOTLS
+	if (ILibTLSDebug_Level > 0 && module->ssl_ctx != NULL && module->RemoteAddress.sin6_family != AF_UNIX)
+	{
+		char peer[96];
+#ifdef MICROSTACK_PROXY
+		char proxy[96];
+		if (module->ProxyAddress.sin6_family != 0)
+		{
+			ILibTLSDebug_printf("sock=%p fd=%d TCP connect to %s via proxy %s", (void*)module, (int)module->internalSocket, ILibAsyncSocket_TLSDebug_Addr((struct sockaddr_in6*)remoteInterface, peer, sizeof(peer)), ILibAsyncSocket_TLSDebug_Addr(&(module->ProxyAddress), proxy, sizeof(proxy)));
+		}
+		else
+#endif
+		{
+			ILibTLSDebug_printf("sock=%p fd=%d TCP connect to %s", (void*)module, (int)module->internalSocket, ILibAsyncSocket_TLSDebug_Addr((struct sockaddr_in6*)remoteInterface, peer, sizeof(peer)));
+		}
+	}
+#endif
 #ifdef MICROSTACK_PROXY
 	if (module->ProxyAddress.sin6_family != 0 && module->RemoteAddress.sin6_family != AF_UNIX)
 	{
@@ -1234,6 +1339,33 @@ void ILibProcessAsyncSocket(struct ILibAsyncSocketModule *Reader, int pendingRea
 			{
 				bytesReceived = recvfrom(Reader->internalSocket, Reader->readBioBuffer_mem + Reader->readBioBuffer->length, (int)(Reader->readBioBuffer->max - Reader->readBioBuffer->length), 0, (struct sockaddr*)&(Reader->SourceAddress), &len);
 			}
+			if (ILibTLSDebug_Level > 0)
+			{
+				if (bytesReceived > 0)
+				{
+					ILibTLSDebug(2, "sock=%p ssl=%p recv %d bytes (read buffer %d/%d)", (void*)Reader, (void*)Reader->ssl, (int)bytesReceived, (int)(Reader->readBioBuffer->length + bytesReceived), (int)Reader->readBioBuffer->max);
+				}
+				else if (bytesReceived == 0)
+				{
+					ILibTLSDebug_printf("sock=%p ssl=%p recv: peer closed the TCP connection (handshakeDone=%d)", (void*)Reader, (void*)Reader->ssl, Reader->TLSHandshakeCompleted);
+				}
+				else
+				{
+#ifdef WIN32
+					int sockErr = WSAGetLastError();
+					if (sockErr != WSAEWOULDBLOCK) { ILibTLSDebug_printf("sock=%p ssl=%p recv failed, WSA error %d (handshakeDone=%d)", (void*)Reader, (void*)Reader->ssl, sockErr, Reader->TLSHandshakeCompleted); }
+					WSASetLastError(sockErr);
+#else
+					int sockErr = errno;
+					if (sockErr != EWOULDBLOCK && sockErr != EAGAIN) { ILibTLSDebug_printf("sock=%p ssl=%p recv failed, errno %d (handshakeDone=%d)", (void*)Reader, (void*)Reader->ssl, sockErr, Reader->TLSHandshakeCompleted); }
+					errno = sockErr;
+#endif
+				}
+				if (Reader->readBioBuffer->length >= Reader->readBioBuffer->max)
+				{
+					ILibTLSDebug_printf("sock=%p ssl=%p WARNING read buffer full (%d bytes) before recv", (void*)Reader, (void*)Reader->ssl, (int)Reader->readBioBuffer->max);
+				}
+			}
 			if (bytesReceived > 0)
 			{
 				Reader->readBioBuffer->length += bytesReceived;
@@ -1244,14 +1376,17 @@ void ILibProcessAsyncSocket(struct ILibAsyncSocketModule *Reader, int pendingRea
 					{
 					case 0:
 						// Handshake Failed!
+						ILibTLSDebug(1, "sock=%p ssl=%p SSL_do_handshake returned 0 (%s)", (void*)Reader, (void*)Reader->ssl, ILibAsyncSocket_TLSDebug_ErrName(SSL_get_error(Reader->ssl, 0)));
 						while ((sslerror = ERR_get_error()) != 0)
 						{
 							ERR_error_string_n(sslerror, ILibScratchPad, sizeof(ILibScratchPad));
+							ILibTLSDebug(1, "sock=%p   openssl error: %s", (void*)Reader, ILibScratchPad);
 							ILibRemoteLogging_printf(ILibChainGetLogger(Reader->Transport.ChainLink.ParentChain), ILibRemoteLogging_Modules_Microstack_AsyncSocket | ILibRemoteLogging_Modules_ConsolePrint,
 								ILibRemoteLogging_Flags_VerbosityLevel_1, "AsyncSocket[%p] TLS handshake failed: %s", (void*)Reader, ILibScratchPad);
 						}
 						break;
 					case 1:
+						ILibTLSDebug(1, "sock=%p ssl=%p handshake complete, connection ready", (void*)Reader, (void*)Reader->ssl);
 						Reader->SSLConnect = Reader->TLSHandshakeCompleted = 1;
 						if (Reader->OnConnect != NULL)
 						{
@@ -1265,12 +1400,14 @@ void ILibProcessAsyncSocket(struct ILibAsyncSocketModule *Reader, int pendingRea
 					default:
 						// SSL_WANT_READ most likely
 						sslerror = SSL_get_error(Reader->ssl, sslerror);
+						ILibTLSDebug((sslerror == SSL_ERROR_WANT_READ || sslerror == SSL_ERROR_WANT_WRITE) ? 2 : 1, "sock=%p ssl=%p SSL_do_handshake -> %s", (void*)Reader, (void*)Reader->ssl, ILibAsyncSocket_TLSDebug_ErrName(sslerror));
 						if (sslerror == SSL_ERROR_SSL)
 						{
 							// Log the OpenSSL reason (e.g. certificate verify failed) before the socket is torn down
 							while ((sslerror = ERR_get_error()) != 0)
 							{
 								ERR_error_string_n(sslerror, ILibScratchPad, sizeof(ILibScratchPad));
+								ILibTLSDebug(1, "sock=%p   openssl error: %s", (void*)Reader, ILibScratchPad);
 								ILibRemoteLogging_printf(ILibChainGetLogger(Reader->Transport.ChainLink.ParentChain), ILibRemoteLogging_Modules_Microstack_AsyncSocket | ILibRemoteLogging_Modules_ConsolePrint,
 									ILibRemoteLogging_Flags_VerbosityLevel_1, "AsyncSocket[%p] TLS handshake failed: %s", (void*)Reader, ILibScratchPad);
 							}
@@ -1295,6 +1432,7 @@ void ILibProcessAsyncSocket(struct ILibAsyncSocketModule *Reader, int pendingRea
 						// We got new TLS Data
 						if (j > 0) 
 						{ 
+							ILibTLSDebug(2, "sock=%p ssl=%p SSL_read %d plaintext bytes", (void*)Reader, (void*)Reader->ssl, j);
 							Reader->EndPointer += j; 
 							if (Reader->MallocSize - Reader->EndPointer == 0)
 							{
@@ -1308,6 +1446,12 @@ void ILibProcessAsyncSocket(struct ILibAsyncSocketModule *Reader, int pendingRea
 							}
 						}
 					}
+					if (ILibTLSDebug_Level > 0)
+					{
+						int readErr = SSL_get_error(Reader->ssl, j);
+						ILibTLSDebug((readErr == SSL_ERROR_WANT_READ || readErr == SSL_ERROR_WANT_WRITE) ? 2 : 1, "sock=%p ssl=%p SSL_read stopped: returned %d (%s), %d plaintext bytes buffered, %d encrypted bytes to send",
+							(void*)Reader, (void*)Reader->ssl, j, ILibAsyncSocket_TLSDebug_ErrName(readErr), (int)(Reader->EndPointer - Reader->BeginPointer), (int)Reader->writeBioBuffer->length);
+					}
 					if (j < 0)
 					{
 						sslerror = SSL_get_error(Reader->ssl, j);
@@ -1318,6 +1462,7 @@ void ILibProcessAsyncSocket(struct ILibAsyncSocketModule *Reader, int pendingRea
 							while ((e = ERR_get_error()) != 0)
 							{
 								ERR_error_string_n(e, ILibScratchPad, sizeof(ILibScratchPad));
+								ILibTLSDebug(1, "sock=%p   openssl error: %s", (void*)Reader, ILibScratchPad);
 								ILibRemoteLogging_printf(ILibChainGetLogger(Reader->Transport.ChainLink.ParentChain), ILibRemoteLogging_Modules_Microstack_AsyncSocket | ILibRemoteLogging_Modules_ConsolePrint,
 									ILibRemoteLogging_Flags_VerbosityLevel_1, "AsyncSocket[%p] TLS read failed: %s", (void*)Reader, ILibScratchPad);
 							}
@@ -1408,6 +1553,12 @@ void ILibProcessAsyncSocket(struct ILibAsyncSocketModule *Reader, int pendingRea
 		//if (bytesReceived == -1 && errno != 0) printf("ERROR: errno = %d, %s\r\n", errno, strerror(errno));
 #endif
 
+#ifndef MICROSTACK_NOTLS
+		if (Reader->ssl != NULL)
+		{
+			ILibTLSDebug(1, "sock=%p ssl=%p closing: recv returned %d (handshakeDone=%d, handshakeError=%d)", (void*)Reader, (void*)Reader->ssl, (int)bytesReceived, Reader->TLSHandshakeCompleted, Reader->TLS_HandshakeError_Occurred);
+		}
+#endif
 		//
 		// This means the socket was gracefully closed by the remote endpoint
 		//
@@ -1676,6 +1827,7 @@ void ILibAsyncSocket_PrivateShutdown(void* socketModule)
 	#ifndef MICROSTACK_NOTLS
 	if ((wasssl = module->ssl) != NULL)
 	{
+		ILibTLSDebug(1, "sock=%p ssl=%p closed by PrivateShutdown (handshakeDone=%d)", (void*)module, (void*)module->ssl, module->TLSHandshakeCompleted);
 		SSL_TRACE1("ILibAsyncSocket_PrivateShutdown()");
 		SSL_free(module->ssl); // Frees SSL session and BIO buffer at the same time
 		module->ssl = NULL;
@@ -1806,6 +1958,9 @@ void ILibAsyncSocket_PostSelect(void* socketModule, int slct, fd_set *readset, f
 	// If there are any errors, shutdown this socket
 	if (serr != 0)
 	{
+#ifndef MICROSTACK_NOTLS
+		if (module->ssl_ctx != NULL) { ILibTLSDebug(1, "sock=%p ssl=%p socket error %d (FinConnect=%d), shutting down", (void*)module, (void*)module->ssl, (int)serr, module->FinConnect); }
+#endif
 		// Unlock before fireing the event
 		ILibSpinLock_UnLock(&(module->SendLock));
 		ILibAsyncSocket_PrivateShutdown(module);
@@ -1839,6 +1994,9 @@ void ILibAsyncSocket_PostSelect(void* socketModule, int slct, fd_set *readset, f
 				}
 				module->FinConnect = 1;
 				module->PAUSE = 0;
+#ifndef MICROSTACK_NOTLS
+				if (module->ssl_ctx != NULL) { ILibTLSDebug(1, "sock=%p fd=%d TCP connected", (void*)module, (int)module->internalSocket); }
+#endif
 
 				// Set the socket to non-blocking mode, so we can play nice and share the thread
 				#if defined(_WIN32_WCE) || defined(WIN32)
@@ -2293,11 +2451,21 @@ SSL* ILibAsyncSocket_SetSSLContextEx(ILibAsyncSocket_SocketModule socketModule, 
 			BIO_get_mem_ptr(module->writeBio, &(module->writeBioBuffer));
 			module->readBioBuffer->length = 0;
 
+			if (ILibTLSDebug_Level > 0)
+			{
+				char peer[96];
+				SSL_set_info_callback(module->ssl, ILibAsyncSocket_TLSDebug_InfoCallback);
+				ILibTLSDebug_printf("sock=%p ssl=%p fd=%d TLS %s setup, peer %s, sni=%s, ctx=%p", (void*)module, (void*)module->ssl, (int)module->internalSocket,
+					server == ILibAsyncSocket_TLS_Mode_Client ? "client" : "server", ILibAsyncSocket_TLSDebug_Addr(&(module->RemoteAddress), peer, sizeof(peer)),
+					(server == ILibAsyncSocket_TLS_Mode_Client && hostName != NULL) ? hostName : "-", (void*)ssl_ctx);
+			}
+
 			if (server == ILibAsyncSocket_TLS_Mode_Client)
 			{
 				if (hostName != NULL) { SSL_set_tlsext_host_name(module->ssl, hostName); }
 				SSL_set_connect_state(module->ssl);
 				status = SSL_do_handshake(module->ssl);
+				if (ILibTLSDebug_Level >= 2) { ILibTLSDebug_printf("sock=%p ssl=%p first SSL_do_handshake returned %d (%s), %d bytes of ClientHello queued", (void*)module, (void*)module->ssl, status, status > 0 ? "done" : ILibAsyncSocket_TLSDebug_ErrName(SSL_get_error(module->ssl, status)), (int)module->writeBioBuffer->length); }
 				if (status <= 0) { status = SSL_get_error(module->ssl, status); }
 				if (status == SSL_ERROR_WANT_READ)
 				{
