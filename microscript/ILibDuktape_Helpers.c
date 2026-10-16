@@ -28,6 +28,7 @@ limitations under the License.
 #include "microstack/ILibParsers.h"
 #include "ILibDuktape_Helpers.h"
 #include "microstack/ILibCrypto.h"
+#include "microstack/ILibTLSDebug.h"
 #include "ILibDuktape_EventEmitter.h"
 
 char stash_key[32];
@@ -1407,3 +1408,28 @@ void ILibDuktape_DisplayProperties(duk_context *ctx, duk_idx_t idx)
 	duk_set_top(ctx, i);
 }
 
+// tlsDebug: log the current JavaScript call stack (innermost first) with file names and line numbers
+void ILibDuktape_TLSDebug_LogJSStack(duk_context *ctx, const char *what)
+{
+	char line[1200];
+	size_t o = 0;
+	int level, n;
+
+	if (ILibTLSDebug_Level <= 0 || ctx == NULL) { return; }
+	line[0] = 0;
+	for (level = -1; level >= -10 && o + 64 < sizeof(line); --level)
+	{
+		duk_inspect_callstack_entry(ctx, level);									// [entry]
+		if (!duk_is_object(ctx, -1)) { duk_pop(ctx); break; }
+		duk_get_prop_string(ctx, -1, "lineNumber");								// [entry][line]
+		duk_get_prop_string(ctx, -2, "function");									// [entry][line][func]
+		duk_get_prop_string(ctx, -1, "name");										// [entry][line][func][name]
+		duk_get_prop_string(ctx, -2, "fileName");									// [entry][line][func][name][file]
+		n = snprintf(line + o, sizeof(line) - o, "%s%s (%s:%d)", o > 0 ? " <- " : "",
+			duk_is_string(ctx, -2) && duk_get_length(ctx, -2) > 0 ? duk_get_string(ctx, -2) : "anonymous",
+			duk_is_string(ctx, -1) ? duk_get_string(ctx, -1) : "native", duk_get_int(ctx, -4));
+		if (n > 0) { o += (size_t)n; }
+		duk_pop_n(ctx, 5);															// ...
+	}
+	ILibTLSDebug_printf("%s | JS stack: %s", what, line);
+}
