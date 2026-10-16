@@ -147,6 +147,7 @@ typedef void(*ILibAsyncSocket_OnBufferReAllocated)(ILibAsyncSocket_SocketModule 
 #ifdef MICROSTACK_TLS_DETECT
 int ILibAsyncSocket_IsUsingTls(ILibAsyncSocket_SocketModule AsyncSocketToken);
 #endif
+void ILibAsyncSocket_TLSDebug_Snapshot(ILibAsyncSocket_SocketModule socketModule, const char *label); // tlsDebug: one line with the socket's buffer, pause and TLS state
 #endif
 /*! @} */
 

@@ -3640,6 +3640,10 @@ int ILibWebClient_GetRemoteInterface(void* socketModule, struct sockaddr *remote
 }
 
 #ifndef MICROSTACK_NOTLS
+void* ILibWebClient_GetSocket(void* stateObject)
+{
+	return(stateObject != NULL ? ((struct ILibWebClientDataObject*)stateObject)->SOCK : NULL);
+}
 X509* ILibWebClient_SslGetCert(void* socketModule)
 {
 	return ILibAsyncSocket_SslGetCert(((struct ILibWebClientDataObject*)socketModule)->SOCK);

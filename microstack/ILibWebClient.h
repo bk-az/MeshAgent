@@ -312,6 +312,7 @@ int ILibWebClient_GetDescriptorValue_FromStateObject(ILibWebClient_StateObject s
 // OpenSSL supporting code
 #ifndef MICROSTACK_NOTLS
 X509*			ILibWebClient_SslGetCert(void* socketModule);
+void*			ILibWebClient_GetSocket(void* stateObject);	// the ILibAsyncSocket behind a web client state object
 STACK_OF(X509)*	ILibWebClient_SslGetCerts(void* socketModule);
 #endif
 

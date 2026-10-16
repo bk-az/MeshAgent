@@ -376,6 +376,7 @@ typedef struct AGENT_RECORD_HEADER
 
 void MeshServer_Connect(MeshAgentHostContainer *agent);
 void MeshServer_ProcessCommand(ILibWebClient_StateObject wcdo, MeshAgentHostContainer *agent, char *buffer, int bufferLen);
+void MeshAgent_TLSDebug_Heartbeat(void *object);
 char ContainerContextGUID[sizeof(JS_ENGINE_CONTEXT) + 1];
 void MeshServer_ConnectEx(MeshAgentHostContainer *agent);
 int agent_VerifyMeshCertificates(MeshAgentHostContainer *agent);
@@ -3016,6 +3017,10 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 		printf("ProcessCommand (%u) %s\n", command, MeshCommand_Name(command));
 		ILIBLOGMESSAGEX("ProcessCommand (%u) %s", command, MeshCommand_Name(command));
 	}
+	if (ILibTLSDebug_Level > 0 && cmdLen > 0 && cmd[0] != '{')
+	{
+		ILibTLSDebug_printf("control channel: received binary command %u %s (%d bytes)", command, MeshCommand_Name(command), cmdLen);
+	}
 
 #ifndef MICROSTACK_NOTLS
 	// If we are not authenticated with the mesh server, we only support auth commands.
@@ -3218,6 +3223,16 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 			}
 			else
 			{
+				if (ILibTLSDebug_Level > 0)
+				{
+					// Log only what the command is; arguments can carry session tokens
+					char *dbgAction = (char*)Duktape_GetStringPropertyValue(agent->meshCoreCtx, -1, "action", "?");
+					char *dbgType = (char*)Duktape_GetStringPropertyValue(agent->meshCoreCtx, -1, "type", "-");
+					char *dbgValue = (char*)Duktape_GetStringPropertyValue(agent->meshCoreCtx, -1, "value", NULL);
+					int dbgValueLen = 0;
+					if (dbgValue != NULL && strcmp(dbgType, "tunnel") == 0) { while (dbgValue[dbgValueLen] != 0 && dbgValue[dbgValueLen] != '?' && dbgValueLen < 200) { ++dbgValueLen; } }
+					ILibTLSDebug_printf("control channel: received JSON command action=%s type=%s (%d bytes)%s%.*s", dbgAction, dbgType, cmdLen, dbgValueLen > 0 ? ", relay " : "", dbgValueLen, dbgValueLen > 0 ? dbgValue : "");
+				}
 				// JSON command... Let's check if it's a PING
 				if (duk_has_prop_string(agent->meshCoreCtx, -1, "action"))
 				{
@@ -3265,7 +3280,24 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 			popCount = 2;
 		}
 
-		if (duk_pcall_method(agent->meshCoreCtx, 2) != 0) { ILibDuktape_Process_UncaughtException(agent->meshCoreCtx); }
+		{
+			long long dbgStart = ILibTLSDebug_Level > 0 ? ILibGetUptime() : 0;
+			if (duk_pcall_method(agent->meshCoreCtx, 2) != 0)
+			{
+				if (ILibTLSDebug_Level > 0)
+				{
+					duk_dup(agent->meshCoreCtx, -1);
+					ILibTLSDebug_printf("control channel: the core THREW while handling the command: %s", duk_safe_to_string(agent->meshCoreCtx, -1));
+					duk_pop(agent->meshCoreCtx);
+				}
+				ILibDuktape_Process_UncaughtException(agent->meshCoreCtx);
+			}
+			else if (ILibTLSDebug_Level > 0)
+			{
+				long long dbgTime = ILibGetUptime() - dbgStart;
+				ILibTLSDebug(dbgTime > 500 ? 1 : 2, "control channel: core handled the command in %lld ms", dbgTime);
+			}
+		}
 		duk_pop_n(agent->meshCoreCtx, popCount);												// ...
 		return;
 	}
@@ -4503,6 +4535,7 @@ void MeshServer_Connect(MeshAgentHostContainer *agent)
 				if (confProbe != NULL) { fclose(confProbe); }
 				OPENSSL_free(confFile);
 			}
+			ILibLifeTime_AddEx(ILibGetBaseTimer(agent->chain), agent, 10000, MeshAgent_TLSDebug_Heartbeat, NULL);
 		}
 		if (ILibTLSDebug_Level > 0)
 		{
@@ -4552,6 +4585,18 @@ void MeshServer_Connect(MeshAgentHostContainer *agent)
 		ILibLifeTime_AddEx(ILibGetBaseTimer(agent->chain), agent, delay, (ILibLifeTime_OnCallback)MeshServer_ConnectEx, NULL);
 		agent->retryTime = delay;
 	}
+}
+
+// tlsDebug: proves the main event loop is alive and shows the control channel's socket state every 10 seconds
+void MeshAgent_TLSDebug_Heartbeat(void *object)
+{
+	MeshAgentHostContainer *agent = (MeshAgentHostContainer*)object;
+	if (ILibTLSDebug_Level <= 0) { return; }
+	ILibTLSDebug_printf("heartbeat: main loop alive, server connection state %d, auth state %d", agent->serverConnectionState, agent->serverAuthState);
+#ifndef MICROSTACK_NOTLS
+	if (agent->controlChannel != NULL) { ILibAsyncSocket_TLSDebug_Snapshot(ILibWebClient_GetSocket(agent->controlChannel), "control channel"); }
+#endif
+	ILibLifeTime_AddEx(ILibGetBaseTimer(agent->chain), agent, 10000, MeshAgent_TLSDebug_Heartbeat, NULL);
 }
 
 #ifndef MICROSTACK_NOTLS
