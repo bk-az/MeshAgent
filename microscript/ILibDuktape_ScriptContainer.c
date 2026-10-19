@@ -2606,7 +2606,13 @@ duk_context *ILibDuktape_ScriptContainer_InitializeJavaScriptEngine_minimal()
 #ifndef MICROSTACK_NOTLS
 	util_openssl_init();
 #endif
-	do { util_random(sizeof(ctxd->nonce), (char*)&(ctxd->nonce)); } while (ctxd->nonce == 0);
+	// Bounded retry: util_random() now always fills the buffer (OS RNG fallback on RNG failure),
+	// so a zero nonce means we drew 0 by chance. Cap the attempts so this can never spin forever.
+	{
+		int nonceAttempts = 0;
+		do { util_random(sizeof(ctxd->nonce), (char*)&(ctxd->nonce)); } while (ctxd->nonce == 0 && ++nonceAttempts < 64);
+		if (ctxd->nonce == 0) { ILIBCRITICALEXITMSG(254, "Unable to generate a non-zero nonce"); }
+	}
 #ifndef MICROSTACK_NOTLS
 	util_openssl_uninit();
 #endif

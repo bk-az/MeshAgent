@@ -683,26 +683,78 @@ static pid_t ILibProcessPipe_ForkPTY_BSD(int *amaster, struct termios *termp, st
 #define forkpty(amaster, name, termp, winp) ILibProcessPipe_ForkPTY_BSD(amaster, termp, winp)
 #endif
 
-// tlsDebug: a child started with an explicit environment would otherwise lose the trace settings.
-// Returns a new NULL-terminated key/value array with MESHAGENT_TLSDEBUG(_FILE) appended, or NULL.
-static void* ILibProcessPipe_TLSDebug_ExtendEnv(void *envvars)
+#ifdef WIN32
+// Windows environment variables a child needs even when the caller supplies an explicit
+// environment block. Without SystemRoot in particular, the legacy CryptAcquireContext() /
+// CryptGenRandom() entropy path -- used by the OpenSSL static libraries, which target
+// _WIN32_WINNT 0x0501 -- fails because the CSP DLL path in the registry is
+// %SystemRoot%\system32\rsaenh.dll. That makes RAND_bytes() fail in the child and (before the
+// util_random() fallback) hung the agent. The rest protect Winsock/side-by-side DLL loading,
+// child shell-outs (ComSpec) and temp-file creation.
+static const char * const ILibProcessPipe_EssentialWinEnv[] = {
+	"SystemRoot", "SystemDrive", "windir", "ComSpec", "PATH", "PATHEXT",
+	"TEMP", "TMP", "ProgramData", "PUBLIC", "ALLUSERSPROFILE", "NUMBER_OF_PROCESSORS"
+};
+#define ILibProcessPipe_EssentialWinEnv_Count ((int)(sizeof(ILibProcessPipe_EssentialWinEnv) / sizeof(ILibProcessPipe_EssentialWinEnv[0])))
+#endif
+
+// A child started with an explicit environment would otherwise lose two classes of variable it
+// still needs: (1) on Windows, the essential OS variables above (the parent's environment is NOT
+// merged in by CreateProcess* when an explicit block is supplied); (2) the TLS trace settings when
+// tracing is enabled. Returns a new NULL-terminated key/value array with the missing variables
+// appended, or NULL if nothing needed adding (caller then keeps the original envvars).
+static void* ILibProcessPipe_ExtendEnv(void *envvars)
 {
-	int n = 0, i;
+	int n = 0, i, extra = 0;
 	char **src = (char**)envvars, **dst;
 	static char lvl[2];
-	if (ILibTLSDebug_Level <= 0 || envvars == NULL) { return(NULL); }
+	if (envvars == NULL) { return(NULL); } // Inherited environment already has everything.
+
 	while (src[n] != NULL) { n += 2; }
-	dst = (char**)ILibMemory_SmartAllocate((n + 5) * sizeof(char*));
+
+	// Worst case extra slots: all essential Windows vars (2 each) + TLS level (2) + TLS file (2).
+#ifdef WIN32
+	extra += ILibProcessPipe_EssentialWinEnv_Count * 2;
+#endif
+	if (ILibTLSDebug_Level > 0) { extra += 4; }
+	if (extra == 0) { return(NULL); }
+
+	dst = (char**)ILibMemory_SmartAllocate((n + extra + 1) * sizeof(char*));
 	for (i = 0; i < n; ++i) { dst[i] = src[i]; }
-	lvl[0] = (char)('0' + (ILibTLSDebug_Level > 9 ? 9 : ILibTLSDebug_Level)); lvl[1] = 0;
-	dst[i++] = ILibTLSDebug_ENV_LEVEL; dst[i++] = lvl;
-	if (ILibTLSDebug_GetLogFile() != NULL) { dst[i++] = ILibTLSDebug_ENV_FILE; dst[i++] = (char*)ILibTLSDebug_GetLogFile(); }
+
+#ifdef WIN32
+	// Append each essential variable that the caller did not already set and that exists in the
+	// parent's environment. getenv() pointers are stable for the process lifetime, which is well
+	// past the synchronous CreateProcess* call that consumes this array.
+	{
+		int e;
+		for (e = 0; e < ILibProcessPipe_EssentialWinEnv_Count; ++e)
+		{
+			const char *key = ILibProcessPipe_EssentialWinEnv[e];
+			char *val;
+			int present = 0, k;
+			for (k = 0; k < n; k += 2) { if (dst[k] != NULL && _stricmp(dst[k], key) == 0) { present = 1; break; } }
+			if (present != 0) { continue; }
+			val = getenv(key);
+			if (val == NULL || val[0] == 0) { continue; }
+			dst[i++] = (char*)key; dst[i++] = val;
+		}
+	}
+#endif
+
+	if (ILibTLSDebug_Level > 0)
+	{
+		lvl[0] = (char)('0' + (ILibTLSDebug_Level > 9 ? 9 : ILibTLSDebug_Level)); lvl[1] = 0;
+		dst[i++] = ILibTLSDebug_ENV_LEVEL; dst[i++] = lvl;
+		if (ILibTLSDebug_GetLogFile() != NULL) { dst[i++] = ILibTLSDebug_ENV_FILE; dst[i++] = (char*)ILibTLSDebug_GetLogFile(); }
+	}
+
 	dst[i] = NULL;
 	return(dst);
 }
 ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_Manager pipeManager, char* target, char* const* parameters, ILibProcessPipe_SpawnTypes spawnType, void *sid, void *envvars, int extraMemorySize)
 {
-	void *tlsDebugEnv = ILibProcessPipe_TLSDebug_ExtendEnv(envvars);
+	void *tlsDebugEnv = ILibProcessPipe_ExtendEnv(envvars);
 	if (tlsDebugEnv != NULL) { envvars = tlsDebugEnv; }
 	ILibTLSDebug(1, "spawning %s (type %d, %s environment)", target, (int)spawnType, envvars != NULL ? "explicit" : "inherited");
 	ILibProcessPipe_Process_Object* retVal = NULL;

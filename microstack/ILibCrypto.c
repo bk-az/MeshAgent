@@ -251,10 +251,59 @@ size_t __fastcall util_hexToBuf(char *hexString, size_t hexStringLength, char* o
 #ifdef MICROSTACK_NOTLS
 int util_random_seeded = 0;
 #endif
+
+#ifndef MICROSTACK_NOTLS
+// OS-level RNG fallback used when OpenSSL's RAND_bytes() fails. OpenSSL 3's DRBG never
+// instantiates (and RAND_bytes() returns 0, leaving the buffer untouched) when its entropy
+// poll fails -- most notably in a child process spawned with an explicit environment that is
+// missing SystemRoot, which breaks the legacy CryptAcquireContext()/CryptGenRandom() path on
+// Windows. Callers like util_random() spin forever on the all-zero buffer in that case, so we
+// fall back to an OS source that does not depend on the process environment. Returns 1 on
+// success (buffer fully filled), 0 on failure.
+static int util_random_os_fallback(int length, char* result)
+{
+#if defined(WIN32) && !defined(_MINCORE)
+	// RtlGenRandom (SystemFunction036) in advapi32: needs no SystemRoot, no CSP, no registry.
+	HMODULE g_hAdvLib = NULL;
+	BOOLEAN(APIENTRY *g_RtlGenRandomPtr)(void*, ULONG) = NULL;
+	int ok = 0;
+	if ((g_hAdvLib = LoadLibraryExA((LPCSTR)"ADVAPI32.DLL", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32)) != NULL)
+	{
+		g_RtlGenRandomPtr = (BOOLEAN(APIENTRY *)(void*, ULONG))GetProcAddress(g_hAdvLib, "SystemFunction036");
+		if (g_RtlGenRandomPtr != NULL && g_RtlGenRandomPtr(result, (ULONG)length) != 0) { ok = 1; }
+		FreeLibrary(g_hAdvLib);
+	}
+	return(ok);
+#elif defined(_POSIX)
+	// /dev/urandom never blocks and does not depend on the process environment.
+	FILE *pFile = fopen("/dev/urandom", "rb");
+	if (pFile != NULL)
+	{
+		size_t got = fread(result, 1, (size_t)length, pFile);
+		fclose(pFile);
+		if (got == (size_t)length) { return(1); }
+	}
+	return(0);
+#else
+	UNREFERENCED_PARAMETER(length);
+	UNREFERENCED_PARAMETER(result);
+	return(0);
+#endif
+}
+#endif
+
 void __fastcall util_random(int length, char* result)
 {
 #ifndef MICROSTACK_NOTLS
-	RAND_bytes((unsigned char*)result, length);
+	if (RAND_bytes((unsigned char*)result, length) != 1)
+	{
+		// OpenSSL's RNG failed and left the buffer untouched. Never return silently with
+		// unfilled (zero) output -- fall back to the OS RNG, and only abort if that also fails.
+		if (util_random_os_fallback(length, result) != 1)
+		{
+			ILIBCRITICALEXITMSG(254, "util_random: RAND_bytes() failed and OS RNG fallback is unavailable");
+		}
+	}
 #else
 	short val;
 	int i;
