@@ -30,6 +30,7 @@ limitations under the License.
 #include "ILibParsers.h"
 #include "ILibRemoteLogging.h"
 #include "ILibProcessPipe.h"
+#include "ILibTLSDebug.h"
 #ifndef WIN32
 #include <fcntl.h>              /* Obtain O_* constant definitions */
 #include <unistd.h>
@@ -682,8 +683,28 @@ static pid_t ILibProcessPipe_ForkPTY_BSD(int *amaster, struct termios *termp, st
 #define forkpty(amaster, name, termp, winp) ILibProcessPipe_ForkPTY_BSD(amaster, termp, winp)
 #endif
 
+// tlsDebug: a child started with an explicit environment would otherwise lose the trace settings.
+// Returns a new NULL-terminated key/value array with MESHAGENT_TLSDEBUG(_FILE) appended, or NULL.
+static void* ILibProcessPipe_TLSDebug_ExtendEnv(void *envvars)
+{
+	int n = 0, i;
+	char **src = (char**)envvars, **dst;
+	static char lvl[2];
+	if (ILibTLSDebug_Level <= 0 || envvars == NULL) { return(NULL); }
+	while (src[n] != NULL) { n += 2; }
+	dst = (char**)ILibMemory_SmartAllocate((n + 5) * sizeof(char*));
+	for (i = 0; i < n; ++i) { dst[i] = src[i]; }
+	lvl[0] = (char)('0' + (ILibTLSDebug_Level > 9 ? 9 : ILibTLSDebug_Level)); lvl[1] = 0;
+	dst[i++] = ILibTLSDebug_ENV_LEVEL; dst[i++] = lvl;
+	if (ILibTLSDebug_GetLogFile() != NULL) { dst[i++] = ILibTLSDebug_ENV_FILE; dst[i++] = (char*)ILibTLSDebug_GetLogFile(); }
+	dst[i] = NULL;
+	return(dst);
+}
 ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_Manager pipeManager, char* target, char* const* parameters, ILibProcessPipe_SpawnTypes spawnType, void *sid, void *envvars, int extraMemorySize)
 {
+	void *tlsDebugEnv = ILibProcessPipe_TLSDebug_ExtendEnv(envvars);
+	if (tlsDebugEnv != NULL) { envvars = tlsDebugEnv; }
+	ILibTLSDebug(1, "spawning %s (type %d, %s environment)", target, (int)spawnType, envvars != NULL ? "explicit" : "inherited");
 	ILibProcessPipe_Process_Object* retVal = NULL;
 	int needSetSid = ((spawnType & ILibProcessPipe_SpawnTypes_POSIX_DETACHED) == ILibProcessPipe_SpawnTypes_POSIX_DETACHED);
 	if (needSetSid != 0) { spawnType ^= ILibProcessPipe_SpawnTypes_POSIX_DETACHED; }
@@ -798,6 +819,7 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 		}
 		envvars = wideEnv;
 	}
+	if (tlsDebugEnv != NULL) { ILibMemory_Free(tlsDebugEnv); tlsDebugEnv = NULL; }
 
 
 	if (((spawnType == ILibProcessPipe_SpawnTypes_DEFAULT || spawnType == ILibProcessPipe_SpawnTypes_DETACHED) && !CreateProcessW(ILibUTF8ToWideEx(target, -1, tmp1, (int)sizeof(tmp1)/2), ILibUTF8ToWideEx(parms, -1, tmp2, (int)sizeof(tmp2)/2), NULL, NULL, spawnType == ILibProcessPipe_SpawnTypes_DETACHED ? FALSE: TRUE, CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW | (needSetSid !=0? (DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP) : 0x00), envvars, NULL, &info, &processInfo)) ||
@@ -855,6 +877,7 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 			((int*)ILibMemory_Extra(vars))[0] = z;
 		}
 	}
+	if (tlsDebugEnv != NULL) { ILibMemory_Free(tlsDebugEnv); tlsDebugEnv = NULL; }
 
 	if (spawnType == ILibProcessPipe_SpawnTypes_TERM)
 	{

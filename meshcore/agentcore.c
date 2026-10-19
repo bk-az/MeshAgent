@@ -377,6 +377,8 @@ typedef struct AGENT_RECORD_HEADER
 void MeshServer_Connect(MeshAgentHostContainer *agent);
 void MeshServer_ProcessCommand(ILibWebClient_StateObject wcdo, MeshAgentHostContainer *agent, char *buffer, int bufferLen);
 void MeshAgent_TLSDebug_Heartbeat(void *object);
+void MeshAgent_TLSDebug_AtExit_BeforeOpenSSL(void);
+void MeshAgent_TLSDebug_AtExit_AfterOpenSSL(void);
 char ContainerContextGUID[sizeof(JS_ENGINE_CONTEXT) + 1];
 void MeshServer_ConnectEx(MeshAgentHostContainer *agent);
 int agent_VerifyMeshCertificates(MeshAgentHostContainer *agent);
@@ -4536,6 +4538,7 @@ void MeshServer_Connect(MeshAgentHostContainer *agent)
 				OPENSSL_free(confFile);
 			}
 			ILibLifeTime_AddEx(ILibGetBaseTimer(agent->chain), agent, 10000, MeshAgent_TLSDebug_Heartbeat, NULL);
+			ILibTLSDebug_ExportToEnv();	// children spawned with an inherited environment pick the trace up
 		}
 		if (ILibTLSDebug_Level > 0)
 		{
@@ -4586,6 +4589,10 @@ void MeshServer_Connect(MeshAgentHostContainer *agent)
 		agent->retryTime = delay;
 	}
 }
+
+// tlsDebug: bracket OpenSSL's atexit cleanup (OPENSSL_cleanup is registered with atexit by the first OPENSSL_init call)
+void MeshAgent_TLSDebug_AtExit_BeforeOpenSSL(void) { ILibTLSDebug(1, "atexit: process is exiting, OpenSSL cleanup runs next"); }
+void MeshAgent_TLSDebug_AtExit_AfterOpenSSL(void) { ILibTLSDebug(1, "atexit: OpenSSL cleanup finished, process exit complete"); }
 
 // tlsDebug: proves the main event loop is alive and shows the control channel's socket state every 10 seconds
 void MeshAgent_TLSDebug_Heartbeat(void *object)
@@ -4843,6 +4850,7 @@ void MeshAgent_Slave(MeshAgentHostContainer *agentHost)
 void MeshAgent_ChainEnd(void *chain, void *user)
 {
 	MeshAgentHostContainer *agent = (MeshAgentHostContainer*)user;
+	ILibTLSDebug(1, "event loop is shutting down, destroying the script engine");
 	if (agent->meshCoreCtx != NULL) 
 	{
 		if (g_displayFinalizerMessages) { printf("\n\n==> Stopping JavaScript Engine\n"); }
@@ -6303,7 +6311,9 @@ void MeshAgent_ScriptMode(MeshAgentHostContainer *agentHost, int argc, char **ar
 
 void MeshAgent_ScriptMode_Dispatched(void *chain, void *user)
 {
+	ILibTLSDebug(1, "script mode: initializing the script engine and running the script");
 	MeshAgent_ScriptMode((MeshAgentHostContainer*)((void**)user)[0], ((int*)((void**)user)[1])[0], (char**)((void**)user)[2]);
+	ILibTLSDebug(1, "script mode: initial script run returned to the event loop");
 }
 void MeshAgent_AgentMode_Dispatched(void *chain, void *user)
 {
@@ -6458,8 +6468,19 @@ int MeshAgent_Start(MeshAgentHostContainer *agentHost, int paramLen, char **para
 
 
 	ILibCriticalLogFilename = ILibString_Copy(MeshAgent_MakeAbsolutePath(agentHost->exePath, ".log"), 0);
+	ILibTLSDebug_InitFromEnv();	// a child process inherits the trace through the environment
+	if (ILibTLSDebug_Level > 0)
+	{
+		ILibTLSDebug_printf("==== process start: %s%s%s, embedded script %d bytes, chain %p", param[0], paramLen > 1 ? " " : "", paramLen > 1 ? param[1] : "", agentHost->meshCoreCtx_embeddedScriptLen, agentHost->chain);
+		atexit(MeshAgent_TLSDebug_AtExit_AfterOpenSSL);		// registered before OpenSSL's own atexit handler, so it runs after it
+	}
 #ifndef MICROSTACK_NOTLS
 	util_openssl_init();
+	if (ILibTLSDebug_Level > 0)
+	{
+		ILibTLSDebug_printf("OpenSSL initialized: %s", OpenSSL_version(OPENSSL_VERSION));
+		atexit(MeshAgent_TLSDebug_AtExit_BeforeOpenSSL);	// registered after OpenSSL's handler, so it runs before OPENSSL_cleanup()
+	}
 #endif
 
 	ILibChain_OnDestroyEvent_AddHandler(agentHost->chain, MeshAgent_ChainEnd, agentHost);
@@ -6486,6 +6507,7 @@ int MeshAgent_Start(MeshAgentHostContainer *agentHost, int paramLen, char **para
 		// We are acting as a scripting engine
 		ILibChain_RunOnMicrostackThreadEx(agentHost->chain, MeshAgent_ScriptMode_Dispatched, reserved);
 		ILibStartChain(agentHost->chain);
+		ILibTLSDebug(1, "script mode: event loop finished, exit code %d", agentHost->exitCode);
 		agentHost->chain = NULL; 
 	}
 	else
@@ -6493,6 +6515,7 @@ int MeshAgent_Start(MeshAgentHostContainer *agentHost, int paramLen, char **para
 		// We are acting as an Agent
 		ILibChain_RunOnMicrostackThreadEx(agentHost->chain, MeshAgent_AgentMode_Dispatched, reserved);
 		ILibStartChain(agentHost->chain);
+		ILibTLSDebug(1, "agent mode: event loop finished");
 		agentHost->chain = NULL; // Mesh agent has exited, set the chain to NULL
 
 		// Close the database
@@ -6638,6 +6661,7 @@ int MeshAgent_Start(MeshAgentHostContainer *agentHost, int paramLen, char **para
 
 void MeshAgent_Destroy(MeshAgentHostContainer* agent)
 {
+	ILibTLSDebug(1, "MeshAgent_Destroy: freeing certificates, database and chain");
 #ifndef MICROSTACK_NOTLS
 	ILibDuktape_ClientCert = NULL;
 	util_freecert(&agent->clientcert);
@@ -6651,6 +6675,7 @@ void MeshAgent_Destroy(MeshAgentHostContainer* agent)
 	if (agent->multicastServerUrl != NULL) { free(agent->multicastServerUrl); agent->multicastServerUrl = NULL; }
 	if (agent->meshServiceName != NULL) { ILibMemory_Free(agent->meshServiceName); agent->meshServiceName = NULL; }
 	if (agent->displayName != NULL) { ILibMemory_Free(agent->displayName); agent->displayName = NULL; }
+	ILibTLSDebug(1, "MeshAgent_Destroy: done, returning to main");
 	if (agent->execparams != NULL) { ILibMemory_Free(agent->execparams); agent->execparams = NULL; }
 #ifdef WIN32
 	if (agent->shCore != NULL)

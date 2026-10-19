@@ -206,6 +206,7 @@ void ILibDuktape_ChildProcess_SubProcess_StdOutHandler(ILibProcessPipe_Process s
 {
 	ILibDuktape_ChildProcess_SubProcess *p = (ILibDuktape_ChildProcess_SubProcess*)user;
 	*bytesConsumed = bufferLen;
+	ILibTLSDebug(1, "child process pid=%d stdout: %d bytes", sender != NULL ? (int)ILibProcessPipe_Process_GetPID(sender) : -1, (int)bufferLen);
 	if (!ILibMemory_CanaryOK(p) || !duk_ctx_is_alive(p->ctx) || duk_ctx_shutting_down(p->ctx)) { return; }
 
 	ILibDuktape_readableStream_WriteData(p->stdOut, buffer, bufferLen);

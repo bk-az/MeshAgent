@@ -11618,6 +11618,27 @@ static pthread_mutex_t ILibTLSDebug_Lock = PTHREAD_MUTEX_INITIALIZER;
 #define ILibTLSDebug_UNLOCK() pthread_mutex_unlock(&ILibTLSDebug_Lock)
 #endif
 
+const char* ILibTLSDebug_GetLogFile(void) { return(ILibTLSDebug_File); }
+void ILibTLSDebug_InitFromEnv(void)
+{
+	const char *lvl = getenv(ILibTLSDebug_ENV_LEVEL);
+	const char *file = getenv(ILibTLSDebug_ENV_FILE);
+	if (ILibTLSDebug_Level > 0 || lvl == NULL || lvl[0] < '1' || lvl[0] > '9') { return; }
+	ILibTLSDebug_Level = lvl[0] - '0';
+	if (file != NULL && file[0] != 0) { ILibTLSDebug_SetLogFile(file); }
+}
+void ILibTLSDebug_ExportToEnv(void)
+{
+	char lvl[2] = { (char)('0' + (ILibTLSDebug_Level > 9 ? 9 : (ILibTLSDebug_Level < 0 ? 0 : ILibTLSDebug_Level))), 0 };
+	if (ILibTLSDebug_Level <= 0) { return; }
+#ifdef WIN32
+	_putenv_s(ILibTLSDebug_ENV_LEVEL, lvl);
+	if (ILibTLSDebug_File != NULL) { _putenv_s(ILibTLSDebug_ENV_FILE, ILibTLSDebug_File); }
+#else
+	setenv(ILibTLSDebug_ENV_LEVEL, lvl, 1);
+	if (ILibTLSDebug_File != NULL) { setenv(ILibTLSDebug_ENV_FILE, ILibTLSDebug_File, 1); }
+#endif
+}
 void ILibTLSDebug_SetLogFile(const char *path)
 {
 	size_t n;
@@ -11637,13 +11658,13 @@ void ILibTLSDebug_printf(const char *format, ...)
 #ifdef WIN32
 	SYSTEMTIME st;
 	GetLocalTime(&st);
-	len = snprintf(line, sizeof(line), "%02u:%02u:%02u.%03u [%5lu] TLS ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, (unsigned long)GetCurrentThreadId());
+	len = snprintf(line, sizeof(line), "%02u:%02u:%02u.%03u [%lu:%lu] TLS ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, (unsigned long)GetCurrentProcessId(), (unsigned long)GetCurrentThreadId());
 #else
 	struct timeval tv;
 	struct tm tmv;
 	gettimeofday(&tv, NULL);
 	localtime_r(&tv.tv_sec, &tmv);
-	len = snprintf(line, sizeof(line), "%02d:%02d:%02d.%03d [%lx] TLS ", tmv.tm_hour, tmv.tm_min, tmv.tm_sec, (int)(tv.tv_usec / 1000), (unsigned long)(uintptr_t)pthread_self());
+	len = snprintf(line, sizeof(line), "%02d:%02d:%02d.%03d [%d:%lx] TLS ", tmv.tm_hour, tmv.tm_min, tmv.tm_sec, (int)(tv.tv_usec / 1000), (int)getpid(), (unsigned long)(uintptr_t)pthread_self());
 #endif
 	if (len < 0) { len = 0; }
 
