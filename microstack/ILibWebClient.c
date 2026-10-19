@@ -77,7 +77,6 @@ void WebClient_TrackUnLock(const char* MethodName, int Occurance, void *data)
 #include "ILibAsyncSocket.h"
 #include "ILibRemoteLogging.h"
 #include "ILibCrypto.h"
-#include "ILibTLSDebug.h"
 
 extern ILibSpinLock *ILibAsyncSocket_GetSpinLock(ILibAsyncSocket_SocketModule socketModule);
 
@@ -1382,10 +1381,8 @@ int ILibWebClient_ProcessWebSocketData(char* buffer, int offset, int length, ILi
 
 	if (length < (i + plen + ((unsigned char)(hdr & WEBSOCKET_MASK) != 0 ? 4 : 0)))
 	{
-		ILibTLSDebug(1, "websocket: incomplete frame, opcode %u FIN %d payload %d, have %d of %d bytes", (unsigned int)OPCODE, FIN, plen, length - offset, (i - offset) + plen + ((unsigned char)(hdr & WEBSOCKET_MASK) != 0 ? 4 : 0));
 		return(offset); // Don't have the entire packet
 	}
-	ILibTLSDebug(2, "websocket: frame opcode %u FIN %d payload %d bytes%s", (unsigned int)OPCODE, FIN, plen, (unsigned char)(hdr & WEBSOCKET_MASK) != 0 ? " (masked)" : "");
 
 	maskingKey = ((unsigned char)(hdr & WEBSOCKET_MASK) == 0) ? NULL : (buffer + i);
 	if (maskingKey != NULL)
@@ -3643,10 +3640,6 @@ int ILibWebClient_GetRemoteInterface(void* socketModule, struct sockaddr *remote
 }
 
 #ifndef MICROSTACK_NOTLS
-void* ILibWebClient_GetSocket(void* stateObject)
-{
-	return(stateObject != NULL ? ((struct ILibWebClientDataObject*)stateObject)->SOCK : NULL);
-}
 X509* ILibWebClient_SslGetCert(void* socketModule)
 {
 	return ILibAsyncSocket_SslGetCert(((struct ILibWebClientDataObject*)socketModule)->SOCK);

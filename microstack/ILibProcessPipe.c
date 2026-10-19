@@ -30,7 +30,6 @@ limitations under the License.
 #include "ILibParsers.h"
 #include "ILibRemoteLogging.h"
 #include "ILibProcessPipe.h"
-#include "ILibTLSDebug.h"
 #ifndef WIN32
 #include <fcntl.h>              /* Obtain O_* constant definitions */
 #include <unistd.h>
@@ -696,67 +695,42 @@ static const char * const ILibProcessPipe_EssentialWinEnv[] = {
 	"TEMP", "TMP", "ProgramData", "PUBLIC", "ALLUSERSPROFILE", "NUMBER_OF_PROCESSORS"
 };
 #define ILibProcessPipe_EssentialWinEnv_Count ((int)(sizeof(ILibProcessPipe_EssentialWinEnv) / sizeof(ILibProcessPipe_EssentialWinEnv[0])))
-#endif
 
-// A child started with an explicit environment would otherwise lose two classes of variable it
-// still needs: (1) on Windows, the essential OS variables above (the parent's environment is NOT
-// merged in by CreateProcess* when an explicit block is supplied); (2) the TLS trace settings when
-// tracing is enabled. Returns a new NULL-terminated key/value array with the missing variables
-// appended, or NULL if nothing needed adding (caller then keeps the original envvars).
+// A child started with an explicit environment would otherwise lose the essential OS variables
+// above: CreateProcess* does NOT merge the parent's environment in when an explicit block is
+// supplied. Returns a new NULL-terminated key/value array with the missing variables appended,
+// or NULL if nothing needed adding (caller then keeps the original envvars).
 static void* ILibProcessPipe_ExtendEnv(void *envvars)
 {
-	int n = 0, i, extra = 0;
+	int n = 0, i, e;
 	char **src = (char**)envvars, **dst;
-	static char lvl[2];
 	if (envvars == NULL) { return(NULL); } // Inherited environment already has everything.
 
 	while (src[n] != NULL) { n += 2; }
-
-	// Worst case extra slots: all essential Windows vars (2 each) + TLS level (2) + TLS file (2).
-#ifdef WIN32
-	extra += ILibProcessPipe_EssentialWinEnv_Count * 2;
-#endif
-	if (ILibTLSDebug_Level > 0) { extra += 4; }
-	if (extra == 0) { return(NULL); }
-
-	dst = (char**)ILibMemory_SmartAllocate((n + extra + 1) * sizeof(char*));
+	dst = (char**)ILibMemory_SmartAllocate((n + ILibProcessPipe_EssentialWinEnv_Count * 2 + 1) * sizeof(char*));
 	for (i = 0; i < n; ++i) { dst[i] = src[i]; }
 
-#ifdef WIN32
 	// Append each essential variable that the caller did not already set and that exists in the
 	// parent's environment. getenv() pointers are stable for the process lifetime, which is well
 	// past the synchronous CreateProcess* call that consumes this array.
+	for (e = 0; e < ILibProcessPipe_EssentialWinEnv_Count; ++e)
 	{
-		int e;
-		for (e = 0; e < ILibProcessPipe_EssentialWinEnv_Count; ++e)
-		{
-			const char *key = ILibProcessPipe_EssentialWinEnv[e];
-			char *val;
-			int present = 0, k;
-			for (k = 0; k < n; k += 2) { if (dst[k] != NULL && _stricmp(dst[k], key) == 0) { present = 1; break; } }
-			if (present != 0) { continue; }
-			val = getenv(key);
-			if (val == NULL || val[0] == 0) { continue; }
-			dst[i++] = (char*)key; dst[i++] = val;
-		}
+		const char *key = ILibProcessPipe_EssentialWinEnv[e];
+		char *val;
+		int present = 0, k;
+		for (k = 0; k < n; k += 2) { if (dst[k] != NULL && _stricmp(dst[k], key) == 0) { present = 1; break; } }
+		if (present != 0) { continue; }
+		val = getenv(key);
+		if (val == NULL || val[0] == 0) { continue; }
+		dst[i++] = (char*)key; dst[i++] = val;
 	}
-#endif
-
-	if (ILibTLSDebug_Level > 0)
-	{
-		lvl[0] = (char)('0' + (ILibTLSDebug_Level > 9 ? 9 : ILibTLSDebug_Level)); lvl[1] = 0;
-		dst[i++] = ILibTLSDebug_ENV_LEVEL; dst[i++] = lvl;
-		if (ILibTLSDebug_GetLogFile() != NULL) { dst[i++] = ILibTLSDebug_ENV_FILE; dst[i++] = (char*)ILibTLSDebug_GetLogFile(); }
-	}
-
+	if (i == n) { ILibMemory_Free(dst); return(NULL); } // Caller already set everything
 	dst[i] = NULL;
 	return(dst);
 }
+#endif
 ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_Manager pipeManager, char* target, char* const* parameters, ILibProcessPipe_SpawnTypes spawnType, void *sid, void *envvars, int extraMemorySize)
 {
-	void *tlsDebugEnv = ILibProcessPipe_ExtendEnv(envvars);
-	if (tlsDebugEnv != NULL) { envvars = tlsDebugEnv; }
-	ILibTLSDebug(1, "spawning %s (type %d, %s environment)", target, (int)spawnType, envvars != NULL ? "explicit" : "inherited");
 	ILibProcessPipe_Process_Object* retVal = NULL;
 	int needSetSid = ((spawnType & ILibProcessPipe_SpawnTypes_POSIX_DETACHED) == ILibProcessPipe_SpawnTypes_POSIX_DETACHED);
 	if (needSetSid != 0) { spawnType ^= ILibProcessPipe_SpawnTypes_POSIX_DETACHED; }
@@ -847,6 +821,8 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 		info.dwFlags |= STARTF_USESTDHANDLES;
 	}
 
+	void *extendedEnv = ILibProcessPipe_ExtendEnv(envvars);
+	if (extendedEnv != NULL) { envvars = extendedEnv; }
 	if (envvars != NULL)
 	{
 		WCHAR *wideEnv;
@@ -871,7 +847,7 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 		}
 		envvars = wideEnv;
 	}
-	if (tlsDebugEnv != NULL) { ILibMemory_Free(tlsDebugEnv); tlsDebugEnv = NULL; }
+	if (extendedEnv != NULL) { ILibMemory_Free(extendedEnv); extendedEnv = NULL; }
 
 
 	if (((spawnType == ILibProcessPipe_SpawnTypes_DEFAULT || spawnType == ILibProcessPipe_SpawnTypes_DETACHED) && !CreateProcessW(ILibUTF8ToWideEx(target, -1, tmp1, (int)sizeof(tmp1)/2), ILibUTF8ToWideEx(parms, -1, tmp2, (int)sizeof(tmp2)/2), NULL, NULL, spawnType == ILibProcessPipe_SpawnTypes_DETACHED ? FALSE: TRUE, CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW | (needSetSid !=0? (DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP) : 0x00), envvars, NULL, &info, &processInfo)) ||
@@ -929,7 +905,6 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 			((int*)ILibMemory_Extra(vars))[0] = z;
 		}
 	}
-	if (tlsDebugEnv != NULL) { ILibMemory_Free(tlsDebugEnv); tlsDebugEnv = NULL; }
 
 	if (spawnType == ILibProcessPipe_SpawnTypes_TERM)
 	{

@@ -62,7 +62,6 @@ extern char __agentExecPath[];
 #include "ILibDuktape_EventEmitter.h"
 #include "ILibDuktape_Helpers.h"
 #include "../microstack/ILibParsers.h"
-#include "../microstack/ILibTLSDebug.h"
 #include "../microstack/ILibRemoteLogging.h"
 #include "../microstack/ILibCrypto.h"
 
@@ -492,7 +491,6 @@ void ILibDuktape_ScriptContainer_CheckEmbedded(char **script, int *scriptLen)
 // Polyfill process object: 
 void ILibDuktape_ScriptContainer_Process_ExitCallback(void *obj)
 {
-	ILibTLSDebug(1, "process.exit: stopping the chain now");
 	if (ILibMemory_CanaryOK(obj))
 	{
 		duk_context *ctx = ((void**)obj)[0];
@@ -532,7 +530,6 @@ duk_ret_t ILibDuktape_ScriptContainer_Process_Exit(duk_context *ctx)
 		if (duk_has_prop_string(ctx, -1, ILibDuktape_ScriptContainer_Exitting)) { return(ILibDuktape_Error(ctx, "Process.exit() forced script termination")); }
 		duk_push_int(ctx, 1);
 		duk_put_prop_string(ctx, -2, ILibDuktape_ScriptContainer_Exitting);			// [process]
-		ILibTLSDebug(1, "process.exit(%d) called by the script, stopping the event loop", nargs == 1 ? duk_require_int(ctx, 0) : 0);
 
 
 		// Execute this later, so that this stack can unwind first, before we destroy the heap
@@ -2678,19 +2675,11 @@ duk_ret_t ILibDuktape_Polyfills_promise_wait_impl(duk_context *ctx)
 
 	if (!duk_has_prop_string(ctx, -2, "settled"))
 	{
-		long long dbgWaitStart = ILibGetUptime();
-		if (ILibTLSDebug_Level > 0)
-		{
-			char dbgWhat[96];
-			snprintf(dbgWhat, sizeof(dbgWhat), "promise.wait() START timeout=%d", timeout);
-			ILibDuktape_TLSDebug_LogJSStack(ctx, dbgWhat);
-		}
 #ifdef WIN32
 		continueResult = ILibChain_Continue(duk_ctx_chain(ctx), NULL, 0, timeout, NULL);
 #else
 		continueResult = ILibChain_Continue(duk_ctx_chain(ctx), NULL, 0, timeout);
 #endif
-		ILibTLSDebug(1, "promise.wait() END after %lld ms, result %d", ILibGetUptime() - dbgWaitStart, (int)continueResult);
 
 		switch (continueResult)
 		{

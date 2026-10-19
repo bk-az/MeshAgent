@@ -206,7 +206,6 @@ typedef struct ILibAsyncSocketModule
 	long long timeout_lastActivity;
 	int timeout_milliSeconds;
 	ILibAsyncSocket_TimeoutHandler timeout_handler;
-	int tlsDebugOnDataDepth;	// tlsDebug: >0 while OnData runs, to detect re-entrant processing of the same socket
 }ILibAsyncSocketModule;
 
 void ILibAsyncSocket_PostSelect(void* object,int slct, fd_set *readset, fd_set *writeset, fd_set *errorset);
@@ -215,35 +214,6 @@ const int ILibMemory_ASYNCSOCKET_CONTAINERSIZE = (const int)sizeof(ILibAsyncSock
 
 #ifndef MICROSTACK_NOTLS
 // ---- Opt-in TLS trace helpers ("tlsDebug=1|2", see ILibTLSDebug.h) ----
-static char* ILibAsyncSocket_TLSDebug_Hex(const char *data, int len, char *out, size_t outLen)
-{
-	int i, max = len < 32 ? len : 32;
-	size_t o = 0;
-	out[0] = 0;
-	for (i = 0; i < max && o + 4 < outLen; ++i) { o += (size_t)snprintf(out + o, outLen - o, "%02x ", (unsigned char)data[i]); }
-	if (len > max && o + 4 < outLen) { snprintf(out + o, outLen - o, "..."); }
-	return(out);
-}
-void ILibAsyncSocket_TLSDebug_Snapshot(ILibAsyncSocket_SocketModule socketModule, const char *label)
-{
-	ILibAsyncSocketModule *m = (ILibAsyncSocketModule*)socketModule;
-	char hex[160];
-	if (ILibTLSDebug_Level <= 0) { return; }
-	if (m == NULL) { ILibTLSDebug_printf("snapshot[%s]: no socket", label); return; }
-	ILibTLSDebug_printf("snapshot[%s] sock=%p ssl=%p fd=%d PAUSE=%d FinConnect=%d SSLConnect=%d handshakeDone=%d | plaintext buffered %d (begin %d, end %d, size %d) | "
-		"read bio %d/%d | write bio %d | pending send %u bytes (queue %s) | OpenSSL pending %d, has unprocessed %d | idle %lld ms",
-		label, (void*)m, (void*)m->ssl, (int)m->internalSocket, m->PAUSE, m->FinConnect, m->SSLConnect, m->TLSHandshakeCompleted,
-		m->EndPointer - m->BeginPointer, m->BeginPointer, m->EndPointer, m->MallocSize,
-		m->readBioBuffer != NULL ? (int)m->readBioBuffer->length : -1, m->readBioBuffer != NULL ? (int)m->readBioBuffer->max : -1,
-		m->writeBioBuffer != NULL ? (int)m->writeBioBuffer->length : -1,
-		m->PendingBytesToSend, m->PendingSend_Head != NULL ? "non-empty" : "empty",
-		m->ssl != NULL ? SSL_pending(m->ssl) : -1, m->ssl != NULL ? SSL_has_pending(m->ssl) : -1,
-		ILibGetUptime() - m->timeout_lastActivity);
-	if (m->buffer != NULL && m->EndPointer > m->BeginPointer)
-	{
-		ILibTLSDebug_printf("snapshot[%s] buffered plaintext: %s (OnData depth %d)", label, ILibAsyncSocket_TLSDebug_Hex(m->buffer + m->BeginPointer, m->EndPointer - m->BeginPointer, hex, sizeof(hex)), m->tlsDebugOnDataDepth);
-	}
-}
 static const char* ILibAsyncSocket_TLSDebug_ErrName(int e)
 {
 	switch (e)
@@ -1558,32 +1528,7 @@ void ILibProcessAsyncSocket(struct ILibAsyncSocketModule *Reader, int pendingRea
 
 		if (Reader->OnData != NULL)
 		{
-#ifndef MICROSTACK_NOTLS
-			int dbgBegin = Reader->BeginPointer, dbgEnd = Reader->EndPointer;
-			if (Reader->ssl != NULL && ILibTLSDebug_Level > 0)
-			{
-				if (Reader->tlsDebugOnDataDepth > 0) { ILibTLSDebug_printf("sock=%p ssl=%p RE-ENTRANT OnData (depth %d): begin %d, end %d", (void*)Reader, (void*)Reader->ssl, Reader->tlsDebugOnDataDepth, dbgBegin, dbgEnd); }
-				ILibTLSDebug(2, "sock=%p ssl=%p OnData with %d bytes (begin %d, end %d)", (void*)Reader, (void*)Reader->ssl, dbgEnd - dbgBegin, dbgBegin, dbgEnd);
-			}
-			++Reader->tlsDebugOnDataDepth;
-#endif
 			Reader->OnData(Reader, Reader->buffer + Reader->BeginPointer, &(iPointer), Reader->EndPointer - Reader->BeginPointer, &(Reader->OnInterrupt), &(Reader->user), &(Reader->PAUSE));
-#ifndef MICROSTACK_NOTLS
-			--Reader->tlsDebugOnDataDepth;
-			if (Reader->ssl != NULL && ILibTLSDebug_Level > 0)
-			{
-				if (Reader->BeginPointer != dbgBegin || Reader->EndPointer < dbgEnd)
-				{
-					ILibTLSDebug_printf("sock=%p ssl=%p buffer CHANGED during OnData: begin %d->%d, end %d->%d, consumed %d", (void*)Reader, (void*)Reader->ssl, dbgBegin, Reader->BeginPointer, dbgEnd, Reader->EndPointer, iPointer);
-				}
-				if (iPointer == 0)
-				{
-					char hex[160];
-					ILibTLSDebug_printf("sock=%p ssl=%p OnData consumed nothing, %d bytes wait for more data: %s", (void*)Reader, (void*)Reader->ssl, Reader->EndPointer - Reader->BeginPointer, Reader->buffer != NULL ? ILibAsyncSocket_TLSDebug_Hex(Reader->buffer + Reader->BeginPointer, Reader->EndPointer - Reader->BeginPointer, hex, sizeof(hex)) : "(no buffer)");
-				}
-				else { ILibTLSDebug(2, "sock=%p ssl=%p OnData consumed %d bytes", (void*)Reader, (void*)Reader->ssl, iPointer); }
-			}
-#endif
 			if (Reader->buffer != NULL)
 			{
 				if (iPointer <= (Reader->EndPointer - Reader->BeginPointer))
@@ -1592,9 +1537,6 @@ void ILibProcessAsyncSocket(struct ILibAsyncSocketModule *Reader, int pendingRea
 					if (iPointer == 0) { break; }
 					Reader->BeginPointer += iPointer;
 				}
-#ifndef MICROSTACK_NOTLS
-				else if (Reader->ssl != NULL) { ILibTLSDebug(1, "sock=%p ssl=%p OnData reported %d bytes consumed but only %d were buffered", (void*)Reader, (void*)Reader->ssl, iPointer, Reader->EndPointer - Reader->BeginPointer); }
-#endif
 			}
 		}
 	}
@@ -2717,9 +2659,6 @@ void ILibAsyncSocket_Pause(ILibAsyncSocket_SocketModule socketModule)
 	struct ILibAsyncSocketModule *sm = (struct ILibAsyncSocketModule*)socketModule;
 	if (socketModule == NULL) { return; }
 
-#ifndef MICROSTACK_NOTLS
-	if (sm->ssl != NULL) { ILibTLSDebug(1, "sock=%p ssl=%p reading PAUSED by the application (was %d)", (void*)sm, (void*)sm->ssl, sm->PAUSE); }
-#endif
 	sm->PAUSE = 1;
 }
 /*! \fn ILibAsyncSocket_Resume(ILibAsyncSocket_SocketModule socketModule)
@@ -2733,9 +2672,6 @@ void ILibAsyncSocket_Resume(ILibAsyncSocket_SocketModule socketModule)
 	struct ILibAsyncSocketModule *sm = (struct ILibAsyncSocketModule*)socketModule;
 	if (sm == NULL) { return; }
 	ILibRemoteLogging_printf(ILibChainGetLogger(sm->Transport.ChainLink.ParentChain), ILibRemoteLogging_Modules_Microstack_AsyncSocket, ILibRemoteLogging_Flags_VerbosityLevel_2, "AsyncSocket[%p] was RESUMED", (void*)socketModule);
-#ifndef MICROSTACK_NOTLS
-	if (sm->ssl != NULL) { ILibTLSDebug(1, "sock=%p ssl=%p reading RESUMED by the application (was %d)", (void*)sm, (void*)sm->ssl, sm->PAUSE); }
-#endif
 	if (sm->PAUSE > 0)
 	{
 		ILibRemoteLogging_printf(ILibChainGetLogger(sm->Transport.ChainLink.ParentChain), ILibRemoteLogging_Modules_Microstack_AsyncSocket, ILibRemoteLogging_Flags_VerbosityLevel_2, "...Unblocking Chain");

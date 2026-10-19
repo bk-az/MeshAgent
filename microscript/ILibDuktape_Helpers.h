@@ -251,6 +251,4 @@ int ILibDuktape_GetReferenceCount(duk_context *ctx, duk_idx_t i);
 #define ILibDuktape_WriteID(ctx, id) duk_push_string(ctx, id);duk_put_prop_string(ctx, -2, ILibDuktape_OBJID)
 void ILibDuktape_DisplayProperties(duk_context *ctx, duk_idx_t idx);
 
-void ILibDuktape_TLSDebug_LogJSStack(duk_context *ctx, const char *what); // tlsDebug: one line with the current JavaScript call stack
-
 #endif

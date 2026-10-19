@@ -19,7 +19,6 @@ limitations under the License.
 #include "ILibDuktapeModSearch.h"
 #include "../microstack/ILibParsers.h"
 #include "../microstack/ILibProcessPipe.h"
-#include "../microstack/ILibTLSDebug.h"
 
 #include "ILibDuktape_Helpers.h"
 #include "ILibDuktape_ReadableStream.h"
@@ -159,7 +158,6 @@ void ILibDuktape_ChildProcess_SubProcess_ExitHandler(ILibProcessPipe_Process sen
 	ILibDuktape_ChildProcess_SubProcess *p = (ILibDuktape_ChildProcess_SubProcess*)user;
 	if (!ILibMemory_CanaryOK(p)) { return; }
 
-	ILibTLSDebug(1, "child process pid=%d exited with code %d", sender != NULL ? (int)ILibProcessPipe_Process_GetPID(sender) : -1, exitCode);
 	p->exitCode = exitCode;
 	p->childProcess = NULL;
 	if (!duk_ctx_is_alive(p->ctx) || duk_ctx_shutting_down(p->ctx)) { return; }
@@ -206,7 +204,6 @@ void ILibDuktape_ChildProcess_SubProcess_StdOutHandler(ILibProcessPipe_Process s
 {
 	ILibDuktape_ChildProcess_SubProcess *p = (ILibDuktape_ChildProcess_SubProcess*)user;
 	*bytesConsumed = bufferLen;
-	ILibTLSDebug(1, "child process pid=%d stdout: %d bytes", sender != NULL ? (int)ILibProcessPipe_Process_GetPID(sender) : -1, (int)bufferLen);
 	if (!ILibMemory_CanaryOK(p) || !duk_ctx_is_alive(p->ctx) || duk_ctx_shutting_down(p->ctx)) { return; }
 
 	ILibDuktape_readableStream_WriteData(p->stdOut, buffer, bufferLen);
@@ -272,14 +269,6 @@ duk_ret_t ILibDuktape_ChildProcess_waitExit(duk_context *ctx)
 		duk_put_prop_string(ctx, -2, "\xFF_WaitExit");		// [spawnedProcess]
 	}
 
-	long long dbgWaitStart = ILibGetUptime();
-	if (ILibTLSDebug_Level > 0)
-	{
-		char dbgWhat[256];
-		snprintf(dbgWhat, sizeof(dbgWhat), "child process waitExit() START pid=%d target=%s timeout=%d (sockets are not serviced while waiting)",
-			Duktape_GetIntPropertyValue(ctx, -1, "pid", -1), Duktape_GetStringPropertyValue(ctx, -1, "_target", "?"), timeout);
-		ILibDuktape_TLSDebug_LogJSStack(ctx, dbgWhat);
-	}
 	void *mods[] = { ILibGetBaseTimer(Duktape_GetChain(ctx)), Duktape_GetPointerProperty(ctx, -1, ILibDuktape_ChildProcess_Manager), ILibDuktape_Process_GetSignalListener(ctx) };
 #ifdef WIN32
 	HANDLE handles[] = { NULL, NULL, NULL, NULL, NULL };
@@ -289,7 +278,6 @@ duk_ret_t ILibDuktape_ChildProcess_waitExit(duk_context *ctx)
 #else
 	continueResult = ILibChain_Continue(chain, (ILibChain_Link**)mods, 3, timeout);
 #endif
-	ILibTLSDebug(1, "child process waitExit() END after %lld ms, result %d", ILibGetUptime() - dbgWaitStart, (int)continueResult);
 	switch (continueResult)
 	{
 		case ILibChain_Continue_Result_ERROR_INVALID_STATE:
@@ -624,13 +612,6 @@ duk_ret_t ILibDuktape_ChildProcess_execFile(duk_context *ctx)
 		return(ILibDuktape_Error(ctx, "child_process.execFile(): Could not exec [%s]", target));
 	}
 	ILibDuktape_ChildProcess_SpawnedProcess_PUSH(ctx, p, callback);
-	if (ILibTLSDebug_Level > 0)
-	{
-		char dbgWhat[400];
-		snprintf(dbgWhat, sizeof(dbgWhat), "child process spawned pid=%d: %.120s %.80s %.80s", (int)ILibProcessPipe_Process_GetPID(p), target,
-			(args != NULL && args[0] != NULL && args[1] != NULL) ? args[1] : "", (args != NULL && args[0] != NULL && args[1] != NULL && args[2] != NULL) ? args[2] : "");
-		ILibDuktape_TLSDebug_LogJSStack(ctx, dbgWhat);
-	}
 	if (g_displayFinalizerMessages)
 	{
 		printf("++++ childProcess.subProcess (pid: %u, %s) [%p]\n", ILibProcessPipe_Process_GetPID(p), target, duk_get_heapptr(ctx, -1));
