@@ -511,22 +511,45 @@ void ILibSimpleDataStore_RebuildKeyTable(ILibSimpleDataStore_Root *root)
 // Restrict access to the data store file so that only the account running the agent
 // (SYSTEM / root) and administrators can read it. The store holds the node's identity
 // material (certificates and private keys), so it must not inherit the world-readable
-// permissions of its parent folder (e.g. Program Files, /usr/local). This is applied on
-// every writable open, so existing installs are hardened on the next agent start.
+// permissions of its parent folder (e.g. Program Files, /usr/local). A new file is created with
+// the restrictive permissions from the start; an existing file is tightened on every open
+// (read-only ones included), so existing installs are hardened on the next agent start.
 #ifdef WIN32
-static void ILibSimpleDataStore_RestrictPermissions(char* filePath)
+// SYSTEM: full, Administrators: full, file owner: full. Protected DACL (no inheritance).
+#define ILibSimpleDataStore_SDDL L"D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)"
+
+// Security descriptor for the data store file, used both to create a new file and to harden an
+// existing one. The caller releases it with LocalFree(). Returns NULL (logged) on failure.
+static PSECURITY_DESCRIPTOR ILibSimpleDataStore_CreateSecurityDescriptor(void)
 {
 	PSECURITY_DESCRIPTOR sd = NULL;
+	if (ConvertStringSecurityDescriptorToSecurityDescriptorW(ILibSimpleDataStore_SDDL, SDDL_REVISION_1, &sd, NULL) == 0)
+	{
+		ILIBLOGMESSAGEX("Unable to build the data store security descriptor: error %u", (unsigned int)GetLastError());
+		return(NULL);
+	}
+	return(sd);
+}
+
+// Replace the DACL of an existing data store file. A failure is logged rather than fatal, so a
+// store that is still readable by other local users shows up in the log instead of staying silent.
+static void ILibSimpleDataStore_RestrictPermissions(char* filePath)
+{
+	PSECURITY_DESCRIPTOR sd = ILibSimpleDataStore_CreateSecurityDescriptor();
 	PACL dacl = NULL;
 	BOOL daclPresent = FALSE, daclDefaulted = FALSE;
+	DWORD err;
 
-	// SYSTEM: full, Administrators: full, file owner: full. Protected DACL (no inheritance).
-	if (ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)", SDDL_REVISION_1, &sd, NULL) != 0 &&
-		GetSecurityDescriptorDacl(sd, &daclPresent, &dacl, &daclDefaulted) != 0 && daclPresent != 0 && dacl != NULL)
+	if (sd == NULL) { return; }
+	if (GetSecurityDescriptorDacl(sd, &daclPresent, &dacl, &daclDefaulted) == 0 || daclPresent == 0 || dacl == NULL)
 	{
-		SetNamedSecurityInfoW(ILibUTF8ToWide(filePath, -1), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, NULL, NULL, dacl, NULL);
+		ILIBLOGMESSAGEX("Unable to read the data store DACL template: error %u", (unsigned int)GetLastError());
 	}
-	if (sd != NULL) { LocalFree(sd); }
+	else if ((err = SetNamedSecurityInfoW(ILibUTF8ToWide(filePath, -1), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, NULL, NULL, dacl, NULL)) != ERROR_SUCCESS)
+	{
+		ILIBLOGMESSAGEX("Unable to restrict permissions on %s: error %u", filePath, (unsigned int)err);
+	}
+	LocalFree(sd);
 }
 #else
 static void ILibSimpleDataStore_RestrictPermissions(FILE* f)
@@ -542,29 +565,26 @@ FILE* ILibSimpleDataStore_OpenFileEx3(char* filePath, int forceTruncateIfNonZero
 	if (created != NULL) { *created = 0; }
 
 #ifdef WIN32
+	int createdRestricted = 0;
 	if (readonly == 0)
 	{
 		HANDLE h = NULL;
-		if (forceTruncateIfNonZero != 0)
+		// A new file gets the restrictive DACL at creation time. Setting it afterwards would leave a
+		// window in which the file carries the inherited (world-readable) ACL of the install folder, and
+		// because the handle is shared for reading, a read handle opened in that window would survive
+		// the later DACL change and could read the node's private key once it is written.
+		SECURITY_ATTRIBUTES sa = { sizeof(SECURITY_ATTRIBUTES), NULL, FALSE };
+		sa.lpSecurityDescriptor = ILibSimpleDataStore_CreateSecurityDescriptor();
+
+		h = CreateFileW(ILibUTF8ToWide(filePath, -1), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, NULL, forceTruncateIfNonZero != 0 ? TRUNCATE_EXISTING : OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+		if (h == INVALID_HANDLE_VALUE && GetLastError() == ERROR_FILE_NOT_FOUND)
 		{
-			h = CreateFileW(ILibUTF8ToWide(filePath, -1), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, NULL, TRUNCATE_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-			if (h == INVALID_HANDLE_VALUE && GetLastError() == ERROR_FILE_NOT_FOUND)
-			{
-				if (created != NULL) { *created = 1; }
-				h = CreateFileW(ILibUTF8ToWide(filePath, -1), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
-			}
+			if (created != NULL) { *created = 1; }
+			createdRestricted = (sa.lpSecurityDescriptor != NULL) ? 1 : 0;
+			h = CreateFileW(ILibUTF8ToWide(filePath, -1), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, createdRestricted != 0 ? &sa : NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
 		}
-		else
-		{
-			h = CreateFileW(ILibUTF8ToWide(filePath, -1), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-			if (h == INVALID_HANDLE_VALUE && GetLastError() == ERROR_FILE_NOT_FOUND)
-			{
-				if (created != NULL) { *created = 1; }
-				h = CreateFileW(ILibUTF8ToWide(filePath, -1), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
-			}
-		}
+		if (sa.lpSecurityDescriptor != NULL) { LocalFree(sa.lpSecurityDescriptor); }
 		if (h == INVALID_HANDLE_VALUE) { return(NULL); }
-		ILibSimpleDataStore_RestrictPermissions(filePath);
 		int fd = _open_osfhandle((intptr_t)h, _O_RDWR);
 		if (fd == -1) { CloseHandle(h); return(NULL); }
 		f = _fdopen(fd, "wb+N");
@@ -579,6 +599,10 @@ FILE* ILibSimpleDataStore_OpenFileEx3(char* filePath, int forceTruncateIfNonZero
 		f = _fdopen(fd, "rb");
 		if (f == NULL) { CloseHandle(h); return(NULL); }
 	}
+	// An existing file may still carry the permissive ACL inherited from the install folder (installs
+	// that predate this hardening), so tighten it on every open, including read-only ones: a start that
+	// only reads the store must not leave it exposed either.
+	if (createdRestricted == 0) { ILibSimpleDataStore_RestrictPermissions(filePath); }
 #else
 	char *flag = readonly == 0 ? "rb+": "rb";
 

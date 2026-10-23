@@ -20,7 +20,8 @@
 #   JOBS              parallel make jobs (default: number of CPUs)
 #   MAKE              GNU make binary (default: gmake if present, else make)
 #
-# The tarball is verified against the .sha256 published on the OpenSSL GitHub release page.
+# The tarball is verified against the SHA-256 pinned in this script (falling back to the .sha256
+# published on the OpenSSL GitHub release page for versions that are not pinned).
 #
 set -eu
 
@@ -74,14 +75,31 @@ sha256_of() {
 	else sha256 -q "$1"; fi
 }
 
+# SHA-256 of each release tarball this repository has been built against, recorded here so the
+# check does not depend on the host the tarball came from (the .sha256 next to the release only
+# catches a corrupt download, not a tampered release). Keep in sync with the same table in
+# build-openssl-windows.ps1 and macos/build-openssl-macos.sh. When adding a version, take the
+# hash from https://www.openssl.org/source/ and check the release .asc against the OpenSSL
+# signing key before recording it.
+known_sha256() {
+	case "$1" in
+		3.5.9) echo 603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a ;;
+		*) echo "" ;;
+	esac
+}
+
 TARBALL="${OPENSSL_TARBALL:-$WORK/openssl-$VERSION.tar.gz}"
 BASEURL="https://github.com/openssl/openssl/releases/download/openssl-$VERSION"
 if [ ! -f "$TARBALL" ]; then
 	echo "Downloading openssl-$VERSION.tar.gz"
 	fetch_url "$BASEURL/openssl-$VERSION.tar.gz" "$TARBALL"
 fi
-fetch_url "$BASEURL/openssl-$VERSION.tar.gz.sha256" "$WORK/expected.sha256"
-EXPECTED="$(cut -d' ' -f1 "$WORK/expected.sha256")"
+EXPECTED="$(known_sha256 "$VERSION")"
+if [ -z "$EXPECTED" ]; then
+	echo "WARNING: no pinned SHA-256 for openssl-$VERSION in $0; falling back to the checksum published with the release" >&2
+	fetch_url "$BASEURL/openssl-$VERSION.tar.gz.sha256" "$WORK/expected.sha256"
+	EXPECTED="$(cut -d' ' -f1 "$WORK/expected.sha256")"
+fi
 ACTUAL="$(sha256_of "$TARBALL")"
 if [ "$EXPECTED" != "$ACTUAL" ]; then
 	echo "SHA256 mismatch for $TARBALL" >&2

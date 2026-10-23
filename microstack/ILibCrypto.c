@@ -1139,6 +1139,13 @@ int __fastcall util_to_p12(struct util_cert cert, char *password, char** data)
 	return len;
 }
 
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L && defined(OPENSSL_NO_RC2)
+// Identities stored by 1.1.x-era agents are RC2-40 PKCS#12; a libcrypto without RC2 (configured with
+// no-rc2, or without the legacy provider) cannot read them and the agent would re-enroll as a new node.
+// The library must be built with no-module and without no-legacy / no-rc2, see openssl/BUILDING.md.
+#error "OpenSSL was configured without RC2; util_from_p12() needs RC2 via the legacy provider to read stored identities"
+#endif
+
 int __fastcall util_from_p12(char* data, int datalen, char* password, struct util_cert* cert)
 {
 	int r = 0;
@@ -1160,6 +1167,13 @@ int __fastcall util_from_p12(char* data, int datalen, char* password, struct uti
 		{
 			ERR_clear_error();
 			r = PKCS12_parse(p12, password, &(cert->pkey), &(cert->x509), NULL);
+		}
+		else
+		{
+			// This libcrypto has no legacy provider (built without no-module, or with no-legacy), so a valid
+			// 1.1.x identity is indistinguishable from a corrupt blob here. Report that as its own result
+			// instead of a plain parse failure: the caller must not throw the stored identity away on it.
+			r = UTIL_P12_LEGACY_UNAVAILABLE;
 		}
 	}
 #endif

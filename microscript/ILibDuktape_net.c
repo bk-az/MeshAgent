@@ -2717,7 +2717,7 @@ duk_ret_t ILibDuktape_TLS_createSecureContext(duk_context *ctx)
 		duk_get_prop_string(ctx, 0, "pfx");													// [secureContext][pfx]
 		duk_size_t pfxLen;
 		char *pfx = (char*)Duktape_GetBuffer(ctx, -1, &pfxLen);
-		if (util_from_p12(pfx, (int)pfxLen, Duktape_GetStringPropertyValue(ctx, 0, "passphrase", ""), cert) == 0)
+		if (util_from_p12(pfx, (int)pfxLen, Duktape_GetStringPropertyValue(ctx, 0, "passphrase", ""), cert) <= 0)
 		{
 			// Failed to load certificate
 			return(ILibDuktape_Error(ctx, "tls.createSecureContext(): Invalid passphrase"));
@@ -2833,7 +2833,7 @@ duk_ret_t ILibDuktape_TLS_loadCertificate(duk_context *ctx)
 		duk_put_prop_string(ctx, -2, ILibDuktape_TLS_util_cert);
 		if (pfx != NULL)
 		{
-			if (util_from_p12(pfx, (int)pfxLen, Duktape_GetStringPropertyValue(ctx, 0, "passphrase", NULL), cert) == 0)
+			if (util_from_p12(pfx, (int)pfxLen, Duktape_GetStringPropertyValue(ctx, 0, "passphrase", NULL), cert) <= 0)
 			{
 				// Failed to load certificate
 				return(ILibDuktape_Error(ctx, "tls.loadCertificate(): Invalid passphrase"));

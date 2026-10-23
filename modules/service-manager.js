@@ -81,11 +81,21 @@ function restrictDataStorePermissions(dbPath)
         if (!require('fs').existsSync(dbPath)) { return; }
         if (process.platform == 'win32')
         {
+            // The path stays quoted: ILibProcessPipe joins the arguments with plain spaces, so an unquoted
+            // path under "Program Files" would reach icacls as two arguments. The ACEs mirror
+            // ILibSimpleDataStore_RestrictPermissions() in the agent (SYSTEM + Administrators, full control,
+            // inheritance removed); no owner entry is needed here because this runs elevated, i.e. as a
+            // member of Administrators.
             var child = require('child_process').execFile(process.env['windir'] + '\\system32\\icacls.exe',
                 ['icacls', '"' + dbPath + '"', '/inheritance:r', '/grant:r', '*S-1-5-18:F', '*S-1-5-32-544:F']);
-            child.stdout.on('data', function () { });
-            child.stderr.on('data', function () { });
+            child.stdout.str = ''; child.stdout.on('data', function (c) { this.str += c.toString(); });
+            child.stderr.str = ''; child.stderr.on('data', function (c) { this.str += c.toString(); });
+            child.on('exit', function (c) { this.exitCode = c; });
             child.waitExit();
+            if (child.exitCode != 0)
+            {
+                throw ('icacls exited with code ' + child.exitCode + ': ' + (child.stderr.str + child.stdout.str).trim());
+            }
         }
         else
         {

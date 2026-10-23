@@ -11,7 +11,8 @@
 #   OPENSSL_TARBALL   path to an already downloaded openssl-<ver>.tar.gz (skips the download)
 #   JOBS              parallel make jobs (default: number of CPUs)
 #
-# The tarball is verified against the .sha256 published on the OpenSSL GitHub release page.
+# The tarball is verified against the SHA-256 pinned in this script (falling back to the .sha256
+# published on the OpenSSL GitHub release page for versions that are not pinned).
 #
 set -euo pipefail
 
@@ -39,14 +40,31 @@ COMMON_OPTS="no-shared no-module no-dso no-weak-ssl-ciphers no-srp no-psk no-com
 no-err no-rc5 no-idea no-md4 no-rmd160 no-seed no-camellia no-bf no-cast no-md2 no-mdc2 \
 no-tests no-apps no-docs --api=1.1.0"
 
+# SHA-256 of each release tarball this repository has been built against, recorded here so the
+# check does not depend on the host the tarball came from (the .sha256 next to the release only
+# catches a corrupt download, not a tampered release). Keep in sync with the same table in
+# ../build-openssl-static.sh and ../build-openssl-windows.ps1. When adding a version, take the
+# hash from https://www.openssl.org/source/ and check the release .asc against the OpenSSL
+# signing key before recording it.
+known_sha256() {
+	case "$1" in
+		3.5.9) echo 603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a ;;
+		*) echo "" ;;
+	esac
+}
+
 TARBALL="${OPENSSL_TARBALL:-$WORK/openssl-$VERSION.tar.gz}"
 BASEURL="https://github.com/openssl/openssl/releases/download/openssl-$VERSION"
 if [ ! -f "$TARBALL" ]; then
 	echo "Downloading openssl-$VERSION.tar.gz"
 	curl -fL --retry 3 -o "$TARBALL" "$BASEURL/openssl-$VERSION.tar.gz"
 fi
-curl -fsL --retry 3 -o "$WORK/expected.sha256" "$BASEURL/openssl-$VERSION.tar.gz.sha256"
-EXPECTED="$(cut -d' ' -f1 "$WORK/expected.sha256")"
+EXPECTED="$(known_sha256 "$VERSION")"
+if [ -z "$EXPECTED" ]; then
+	echo "WARNING: no pinned SHA-256 for openssl-$VERSION in $0; falling back to the checksum published with the release" >&2
+	curl -fsL --retry 3 -o "$WORK/expected.sha256" "$BASEURL/openssl-$VERSION.tar.gz.sha256"
+	EXPECTED="$(cut -d' ' -f1 "$WORK/expected.sha256")"
+fi
 ACTUAL="$(shasum -a 256 "$TARBALL" | cut -d' ' -f1)"
 if [ "$EXPECTED" != "$ACTUAL" ]; then
 	echo "SHA256 mismatch for $TARBALL" >&2

@@ -7,7 +7,7 @@ from the **same OpenSSL version**, otherwise the link fails or, worse, silently 
 | Item | Value |
 |---|---|
 | Current version | OpenSSL 3.5.9 (LTS, supported until 2030-04-08) |
-| Source | https://github.com/openssl/openssl/releases (tarball checksum is verified by the build scripts) |
+| Source | https://github.com/openssl/openssl/releases (the build scripts verify the tarball against a SHA-256 pinned in each script; for a version without a pin they fall back to the `.sha256` published with the release and warn) |
 | Configure options | see `COMMON_OPTS` in `libstatic/macos/build-openssl-macos.sh` |
 
 ## Why the source needs almost no changes
@@ -148,7 +148,9 @@ Summary (OpenSSL 3.5.9):
 
 Useful options: `-Platforms x64,x86` to build a subset, `-Version 3.5.10` for another
 release, `-Tarball C:\path\openssl-3.5.9.tar.gz` to reuse a downloaded archive (its
-SHA256 is still verified against the published checksum).
+SHA256 is still verified against the pinned checksum). When moving to a new release, add its
+SHA-256 to the `known_sha256` / `$KnownSha256` table in all three build scripts after checking
+the release signature.
 
 **3. Check and commit**
 

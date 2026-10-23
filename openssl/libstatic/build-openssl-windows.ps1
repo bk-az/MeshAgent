@@ -13,7 +13,8 @@
     x86   -> libcrypto32MT.lib  libssl32MT.lib  libcrypto32MTd.lib  libssl32MTd.lib
     ARM64 -> libcryptoARM64.lib libsslARM64.lib libcryptoARM64d.lib libsslARM64d.lib
 
-  The tarball is verified against the .sha256 published on the OpenSSL GitHub release page.
+  The tarball is verified against the SHA-256 pinned in this script (falling back to the .sha256
+  published on the OpenSSL GitHub release page for versions that are not pinned).
 
 .EXAMPLE
   pwsh openssl/libstatic/build-openssl-windows.ps1 -Platform x64
@@ -39,6 +40,16 @@ $CommonOpts = @('no-shared', 'no-module', 'no-dso', 'no-weak-ssl-ciphers', 'no-s
 	'no-camellia', 'no-bf', 'no-cast', 'no-md2', 'no-mdc2', 'no-tests', 'no-apps', 'no-docs', 'no-asm',
 	'--api=1.1.0')
 
+# SHA-256 of each release tarball this repository has been built against, recorded here so the
+# check does not depend on the host the tarball came from (the .sha256 next to the release only
+# catches a corrupt download, not a tampered release). Keep in sync with the same table in
+# build-openssl-static.sh and macos/build-openssl-macos.sh. When adding a version, take the hash
+# from https://www.openssl.org/source/ and check the release .asc against the OpenSSL signing key
+# before recording it.
+$KnownSha256 = @{
+	'3.5.9' = '603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a'
+}
+
 switch ($Platform) {
 	'x64'   { $Target = 'VC-WIN64A';   $Suffix = '64MT';  $DebugSuffix = '64MTd' }
 	'x86'   { $Target = 'VC-WIN32';    $Suffix = '32MT';  $DebugSuffix = '32MTd' }
@@ -54,11 +65,16 @@ try {
 		Write-Host "Downloading openssl-$Version.tar.gz"
 		Invoke-WebRequest -UseBasicParsing -Uri "$BaseUrl/openssl-$Version.tar.gz" -OutFile $Tarball
 	}
-	# Download the checksum to a file: Windows PowerShell 5.1 returns binary content as a byte
-	# array for this file's MIME type, so .Content cannot be used as a string.
-	$ShaFile = Join-Path $Work 'expected.sha256'
-	Invoke-WebRequest -UseBasicParsing -Uri "$BaseUrl/openssl-$Version.tar.gz.sha256" -OutFile $ShaFile
-	$Expected = ((Get-Content $ShaFile -Raw).Trim() -split '\s+')[0].ToLower()
+	if ($KnownSha256.ContainsKey($Version)) {
+		$Expected = $KnownSha256[$Version]
+	} else {
+		Write-Warning "No pinned SHA-256 for openssl-$Version in this script; falling back to the checksum published with the release"
+		# Download the checksum to a file: Windows PowerShell 5.1 returns binary content as a byte
+		# array for this file's MIME type, so .Content cannot be used as a string.
+		$ShaFile = Join-Path $Work 'expected.sha256'
+		Invoke-WebRequest -UseBasicParsing -Uri "$BaseUrl/openssl-$Version.tar.gz.sha256" -OutFile $ShaFile
+		$Expected = ((Get-Content $ShaFile -Raw).Trim() -split '\s+')[0].ToLower()
+	}
 	$Actual = (Get-FileHash -Algorithm SHA256 $Tarball).Hash.ToLower()
 	if ($Expected -ne $Actual) { throw "SHA256 mismatch for ${Tarball}: expected $Expected, actual $Actual" }
 	Write-Host "Verified openssl-$Version.tar.gz ($Actual)"

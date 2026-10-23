@@ -27,6 +27,14 @@ on:
 env:
   OPENSSL_VERSION: ${{ inputs.version || '3.5.9' }}
 
+# The output of this workflow is committed and statically linked into an agent that runs as
+# root/SYSTEM, so: least-privilege token, third-party actions pinned to commit SHAs and container
+# images pinned to digests, so a retagged action or image cannot change the libraries silently.
+# To update a pin: `gh api repos/<owner>/<repo>/git/ref/tags/<tag> --jq .object.sha` for an
+# action, `docker buildx imagetools inspect <image>:<tag>` for an image.
+permissions:
+  contents: read
+
 jobs:
   windows:
     name: Windows ${{ matrix.platform }}
@@ -45,9 +53,9 @@ jobs:
             vsarch: amd64_arm64
             files: "openssl/libstatic/*ARM64*.lib"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Set up MSVC (${{ matrix.vsarch }})
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
         with:
           arch: ${{ matrix.vsarch }}
       - name: Build OpenSSL ${{ env.OPENSSL_VERSION }} for ${{ matrix.platform }}
@@ -60,7 +68,7 @@ jobs:
             if (-not (Select-String -Path $f -Pattern "OpenSSL $env:OPENSSL_VERSION" -Quiet)) { throw "$f does not contain the OpenSSL $env:OPENSSL_VERSION banner" }
             Write-Host "$($f.Name): OpenSSL $env:OPENSSL_VERSION"
           }
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: openssl-windows-${{ matrix.platform }}
           path: ${{ matrix.files }}
@@ -70,7 +78,7 @@ jobs:
     name: Linux x86, x86-64, alpine-x86-64
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install packages
         run: |
           sudo apt-get update &&
@@ -81,7 +89,7 @@ jobs:
         run: ./openssl/libstatic/build-openssl-static.sh x86 $OPENSSL_VERSION
       - name: Build alpine-x86-64 (musl)
         run: ./openssl/libstatic/build-openssl-static.sh alpine-x86-64 $OPENSSL_VERSION
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: openssl-linux-x86
           path: |
@@ -94,7 +102,7 @@ jobs:
     name: Linux arm64 (native) and aarch64 (bookworm container)
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install packages
         run: sudo apt-get update && sudo apt-get install -y build-essential
       - name: Build arm64 (ARCHID=26)
@@ -103,11 +111,11 @@ jobs:
       # 2.36 floor; build the library in the same image.
       - name: Build aarch64 (ARCHID=32) in debian:bookworm
         run: |
-          docker run --rm -e OPENSSL_VERSION -v "${{ github.workspace }}":/src -w /src debian:bookworm bash -c '
+          docker run --rm -e OPENSSL_VERSION -v "${{ github.workspace }}":/src -w /src debian:bookworm@sha256:854dd8ab51d62866dbd8f5431d15ce77b12983a2a4a1e1fe43a2395dc7ef9f61 bash -c '
             apt-get update && apt-get install -y build-essential perl curl ca-certificates binutils &&
             ./openssl/libstatic/build-openssl-static.sh aarch64 $OPENSSL_VERSION
           '
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: openssl-linux-arm64
           path: |
@@ -120,19 +128,19 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Enable 32-bit ARM emulation
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
         with:
           platforms: arm
       # Same image as the ARCHID=25 agent build in linux-build.yml (armv6 hardfloat, glibc 2.31).
       - name: Build armhf (ARCHID=25) in an armv6 container
         run: |
-          docker run --rm -e OPENSSL_VERSION --platform linux/arm/v6 --entrypoint /bin/bash -v "${{ github.workspace }}":/src -w /src balenalib/rpi-raspbian:bullseye -c '
+          docker run --rm -e OPENSSL_VERSION --platform linux/arm/v6 --entrypoint /bin/bash -v "${{ github.workspace }}":/src -w /src balenalib/rpi-raspbian:bullseye@sha256:851cfc48b26f6413a72a7f6873a7624ba2a427048976f6ab4483f72fe165d4f1 -c '
             apt-get update && apt-get install -y build-essential perl curl ca-certificates binutils &&
             ./openssl/libstatic/build-openssl-static.sh armhf $OPENSSL_VERSION
           '
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: openssl-linux-armhf
           path: openssl/libstatic/linux/armhf/*.a
@@ -142,16 +150,16 @@ jobs:
     name: FreeBSD x86_64 (ARCHID=30)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Same release as freebsd-build.yml so the library and the agent share one baseline.
       - name: Build in FreeBSD VM
-        uses: vmactions/freebsd-vm@v1
+        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
         with:
           release: "13.5"
           envs: "OPENSSL_VERSION"
           prepare: pkg install -y gmake perl5 curl
           run: ./openssl/libstatic/build-openssl-static.sh freebsd_x86-64 $OPENSSL_VERSION
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: openssl-freebsd
           path: openssl/libstatic/bsd/freebsd_x86-64/*.a
@@ -161,14 +169,14 @@ jobs:
     name: OpenBSD x86_64 (ARCHID=37)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build in OpenBSD VM
-        uses: vmactions/openbsd-vm@v1
+        uses: vmactions/openbsd-vm@f1ca8bc8ecc5b6ef7218e5b914836e067e1546d3 # v1.4.9
         with:
           envs: "OPENSSL_VERSION"
           prepare: pkg_add gmake curl
           run: ./openssl/libstatic/build-openssl-static.sh openbsd_x86-64 $OPENSSL_VERSION
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: openssl-openbsd
           path: openssl/libstatic/bsd/openbsd_x86-64/*.a

@@ -85,16 +85,7 @@ function sessionDispatch(tsid, parent, method, args)
     child.stdout.on('data', function (c) { this.str += c.toString(); });
     child.stderr.on('data', function (c) { });
     child.on('exit', function (c) { this.exitCode = c; });
-    // Bounded wait: waitExit() runs on the agent's main loop and does not service the control
-    // channel while it blocks, so a child that never exits (e.g. one stuck in the OpenSSL nonce
-    // loop) would freeze the whole agent. Cap the wait and kill a stuck child so a misbehaving
-    // dispatch degrades this one feature instead of taking down the agent.
-    child.waitExit(5000);
-    if (child.exitCode == null)
-    {
-        try { child.kill(); } catch (e) { }
-        throw ('sessionDispatch: child process did not exit within timeout');
-    }
+    child.waitExit();
     if (child.exitCode == 0)
     {
         return (child.stdout.str.trim()); // If the return code was 0, then relay the response from stdout
