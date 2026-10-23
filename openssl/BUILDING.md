@@ -100,6 +100,13 @@ that this fork does not build; the `openssl-<arch>` scripts next to them documen
 cross-toolchain invocations and have been updated to the 3.x option list, but the libraries have
 not been rebuilt.
 
+**FreeBSD and OpenBSD are not supported by this fork for now.** The libraries under
+`libstatic/bsd/` are still the OpenSSL 1.1.1s build and no longer link against the 3.5.9 headers
+(the agent now calls 3.x-only functions such as `OSSL_PROVIDER_load`), so `make freebsd ARCHID=30`,
+`make openbsd ARCHID=37` and the *FreeBSD Build* workflow fail at link time until those libraries
+are rebuilt. To bring BSD back, run `build-openssl-static.sh freebsd_x86-64` / `openbsd_x86-64` on
+those platforms (or the `freebsd` and `openbsd` jobs of `openssl-libs.yml`) and commit the output.
+
 ### Windows (`libstatic/*.lib`)
 
 Step-by-step guide for a Windows machine with Visual Studio 2022 (Community, Professional or
@@ -227,8 +234,8 @@ Get-ChildItem openssl\libstatic\libcrypto*.lib | % { "{0,-24} {1}" -f $_.Name, (
 **2. Every agent builds and links.** `make macos ARCHID=29` / `16`, `make linux ARCHID=6` etc.,
 `msbuild MeshAgent-2022.sln /p:Configuration=Release /p:Platform=x64` (and x86, ARM64). A link
 error mentioning `OPENSSL_` or `SSL_` symbols means the library for that platform is still old.
-After the branch is pushed, the *Windows Build*, *Linux Build*, *macOS Build* and *FreeBSD Build*
-workflows must all be green.
+After the branch is pushed, the *Windows Build*, *Linux Build* and *macOS Build* workflows must all
+be green. *FreeBSD Build* stays red until the BSD libraries are rebuilt (see "Linux and BSD" above).
 
 **3. The binaries carry the new version and no old banner.**
 
@@ -260,7 +267,8 @@ version in the release notes / asset inventory as the report's remediation asks.
 ## Upgrading to a newer OpenSSL
 
 1. Run the macOS script with the new version and `--refresh-headers`.
-2. Rebuild the Linux/BSD/Windows libraries with the same options.
+2. Rebuild the Linux/Windows libraries with the same options (and the BSD ones, if BSD support
+   has been restored by then).
 3. Build the agent (`make macos ARCHID=29` etc.) and confirm `meshagent -info` reports the
    new version; run an agent that has an existing `.db` to confirm its node ID is unchanged.
 4. Skim the OpenSSL `CHANGES.md` for removed functions and grep for them in `microstack`
