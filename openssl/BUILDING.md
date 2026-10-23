@@ -102,10 +102,13 @@ not been rebuilt.
 
 **FreeBSD and OpenBSD are not supported by this fork for now.** The libraries under
 `libstatic/bsd/` are still the OpenSSL 1.1.1s build and no longer link against the 3.5.9 headers
-(the agent now calls 3.x-only functions such as `OSSL_PROVIDER_load`), so `make freebsd ARCHID=30`,
-`make openbsd ARCHID=37` and the *FreeBSD Build* workflow fail at link time until those libraries
-are rebuilt. To bring BSD back, run `build-openssl-static.sh freebsd_x86-64` / `openbsd_x86-64` on
-those platforms (or the `freebsd` and `openbsd` jobs of `openssl-libs.yml`) and commit the output.
+(the agent now calls 3.x-only functions such as `OSSL_PROVIDER_load`), so `make freebsd ARCHID=30`
+and `make openbsd ARCHID=37` fail at link time until those libraries are rebuilt. The *FreeBSD
+Build* workflow is therefore reduced to a manual trigger, the `freebsd` job is removed from
+`release.yml` and `meshagent_freebsd_x86-64` from `.github/release-files.json`. To bring BSD back,
+run `build-openssl-static.sh freebsd_x86-64` / `openbsd_x86-64` on those platforms (or the
+`freebsd` and `openbsd` jobs of `openssl-libs.yml`), commit the output, and restore those three
+workflow entries.
 
 ### Windows (`libstatic/*.lib`)
 
@@ -235,7 +238,7 @@ Get-ChildItem openssl\libstatic\libcrypto*.lib | % { "{0,-24} {1}" -f $_.Name, (
 `msbuild MeshAgent-2022.sln /p:Configuration=Release /p:Platform=x64` (and x86, ARM64). A link
 error mentioning `OPENSSL_` or `SSL_` symbols means the library for that platform is still old.
 After the branch is pushed, the *Windows Build*, *Linux Build* and *macOS Build* workflows must all
-be green. *FreeBSD Build* stays red until the BSD libraries are rebuilt (see "Linux and BSD" above).
+be green. *FreeBSD Build* is manual-only until the BSD libraries are rebuilt (see "Linux and BSD" above).
 
 **3. The binaries carry the new version and no old banner.**
 
