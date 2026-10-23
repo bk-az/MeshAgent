@@ -39,6 +39,13 @@ $CommonOpts = @('no-shared', 'no-module', 'no-dso', 'no-weak-ssl-ciphers', 'no-s
 	'no-zlib', 'no-zlib-dynamic', 'no-err', 'no-rc5', 'no-idea', 'no-md4', 'no-rmd160', 'no-seed',
 	'no-camellia', 'no-bf', 'no-cast', 'no-md2', 'no-mdc2', 'no-tests', 'no-apps', 'no-docs', 'no-asm',
 	'--api=1.1.0')
+# Windows only: target Windows 7+. At _WIN32_WINNT >= 0x0600 OpenSSL seeds its DRBG through
+# BCryptGenRandom (rand_win.c) instead of CryptAcquireContext/CryptGenRandom. The CryptoAPI path
+# needs %SystemRoot% in the process environment to locate the CSP DLL and fails in children spawned
+# with a minimal explicit environment, which is what the SystemRoot injection in ILibProcessPipe.c
+# and the util_random() OS fallback work around. Libraries built before this define was added
+# still use CryptGenRandom; `strings libcrypto64MT.lib | grep BCryptGenRandom` tells them apart.
+$WinOpts = @('-D_WIN32_WINNT=0x0601')
 
 # SHA-256 of each release tarball this repository has been built against, recorded here so the
 # check does not depend on the host the tarball came from (the .sha256 next to the release only
@@ -90,7 +97,7 @@ try {
 		Push-Location $Src
 		try {
 			Write-Host "==> Configuring $Platform $($variant.Name) ($Target)"
-			$configureArgs = @($Target) + $CommonOpts + @($variant.Extra)
+			$configureArgs = @($Target) + $CommonOpts + $WinOpts + @($variant.Extra)
 			& perl Configure @configureArgs
 			if ($LASTEXITCODE -ne 0) { throw "Configure failed" }
 			Write-Host "==> Building $Platform $($variant.Name)"
