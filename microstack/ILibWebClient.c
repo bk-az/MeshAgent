@@ -3557,7 +3557,6 @@ static int ILibWebClient_Https_AuthenticateServer(int preverify_ok, X509_STORE_C
 		retVal = wcdo->Parent->OnHttpsConnection(token, preverify_ok, certChain, &(wcdo->remote), wcdo->Parent->OnHttpsConnectionData);
 		//sk_X509_free(certChain);
 	}
-	util_tlsdebug_verify("webclient", preverify_ok, ctx, retVal);
 	SSL_TRACE2("ILibWebClient_Https_AuthenticateServer()");
 
 	return retVal;

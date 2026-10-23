@@ -249,38 +249,6 @@ extract the agent executable from it, and repeat step 3 on *that* file. The find
 only when the file customers download reports the new version. Keep the build date and OpenSSL
 version in the release notes / asset inventory as the report's remediation asks.
 
-## Debugging TLS problems
-
-The agent has an opt-in TLS trace. Add one line to the agent's `.msh` (next to the
-executable) and restart it; the value is read on every control-channel connect:
-
-```
-tlsDebug=1      # connection events, certificate checks, errors, close reasons
-tlsDebug=2      # additionally every handshake state and every recv/SSL_read/SSL_write
-```
-
-Lines are timestamped to the millisecond, carry the thread id, and are written both to the
-console (`<agent> run`) and to `<agent>.tls.log` next to the executable, so the trace also
-works when the agent runs as a service. Each connection is identified by `sock=` and `ssl=`
-pointers, so the lifecycle of a single relay tunnel can be followed with a search.
-
-What it records:
-
-- at startup: OpenSSL version and platform, `OPENSSLDIR`, `OPENSSL_CONF`, and whether the
-  default `openssl.cnf` exists (OpenSSL 3 loads it automatically, 1.1.1 builds did not
-  depend on it in the same way);
-- TCP connect (and proxy), TCP connected, socket errors;
-- TLS setup with peer address and SNI, handshake start/done with protocol and cipher,
-  alerts sent or received, and failures with the full OpenSSL error queue;
-- every certificate-verify callback for the control channel (`verify[webclient]`) and for
-  relay tunnels (`verify[tunnel/...]`, including how long `checkServerIdentity` took), and
-  every Windows ROOT store lookup with its duration;
-- `tls.connect()` calls from the JavaScript core and what was handed back to it
-  (`secureConnect`, `error`, disconnect);
-- every close path with its reason.
-
-Remove the line again afterwards: level 2 writes several lines per packet.
-
 ## Upgrading to a newer OpenSSL
 
 1. Run the macOS script with the new version and `--refresh-headers`.

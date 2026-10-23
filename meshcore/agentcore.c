@@ -41,11 +41,6 @@ limitations under the License.
 #include "microstack/ILibMulticastSocket.h"
 #include "microscript/ILibDuktape_ScriptContainer.h"
 #include "../microstack/ILibIPAddressMonitor.h"
-#include "microstack/ILibTLSDebug.h"
-#ifndef MICROSTACK_NOTLS
-#include <openssl/crypto.h>
-#include <openssl/conf.h>
-#endif
 
 #ifdef _POSIX
 #include <sys/stat.h>
@@ -4478,38 +4473,6 @@ void MeshServer_Connect(MeshAgentHostContainer *agent)
 	agent->logUpdate = ILibSimpleDataStore_Get(agent->masterDb, "logUpdate", NULL, 0);
 	agent->fakeUpdate = ILibSimpleDataStore_Get(agent->masterDb, "fakeUpdate", NULL, 0);
 	agent->controlChannelDebug = ILibSimpleDataStore_Get(agent->masterDb, "controlChannelDebug", NULL, 0);
-	{
-		// Opt-in TLS trace: "tlsDebug=1" (events) or "tlsDebug=2" (verbose), written to <agent>.tls.log next to the executable
-		int tlsDebugLen = ILibSimpleDataStore_Get(agent->masterDb, "tlsDebug", ILibScratchPad, sizeof(ILibScratchPad));
-		int tlsDebugWas = ILibTLSDebug_Level;
-		if (tlsDebugLen > 1 && ILibScratchPad[0] >= '0' && ILibScratchPad[0] <= '9') { ILibTLSDebug_Level = ILibScratchPad[0] - '0'; }
-		else { ILibTLSDebug_Level = tlsDebugLen > 1 ? 1 : 0; }
-#ifndef MICROSTACK_NOTLS
-		if (ILibTLSDebug_Level > 0 && tlsDebugWas == 0)
-		{
-			char *confFile = CONF_get1_default_config_file();
-			FILE *confProbe = NULL;
-			ILibTLSDebug_SetLogFile(MeshAgent_MakeAbsolutePath(agent->exePath, ".tls.log"));
-			ILibTLSDebug_printf("==== TLS trace level %d enabled: %s, %s", ILibTLSDebug_Level, OpenSSL_version(OPENSSL_VERSION), OpenSSL_version(OPENSSL_PLATFORM));
-			ILibTLSDebug_printf("%s, OPENSSL_CONF=%s", OpenSSL_version(OPENSSL_DIR), getenv("OPENSSL_CONF") != NULL ? getenv("OPENSSL_CONF") : "(not set)");
-			if (confFile != NULL)
-			{
-#ifdef WIN32
-				if (fopen_s(&confProbe, confFile, "r") != 0) { confProbe = NULL; }
-#else
-				confProbe = fopen(confFile, "r");
-#endif
-				ILibTLSDebug_printf("default config file %s: %s", confFile, confProbe != NULL ? "EXISTS (OpenSSL 3 loads it at startup)" : "not present");
-				if (confProbe != NULL) { fclose(confProbe); }
-				OPENSSL_free(confFile);
-			}
-		}
-		if (ILibTLSDebug_Level > 0)
-		{
-			ILibTLSDebug_printf("---- control channel connect attempt, agent build %s", __DATE__ " " __TIME__);
-		}
-#endif
-	}
 	ILibDuktape_HECI_Debug = (ILibSimpleDataStore_Get(agent->masterDb, "heciDebug", NULL, 0) != 0);
 	agent->timerLogging = ILibSimpleDataStore_Get(agent->masterDb, "timerLogging", NULL, 0);
 	agent->consoleText_maxRate = ILibSimpleDataStore_GetInt(agent->masterDb, "consoleTextMaxRate", 10);
