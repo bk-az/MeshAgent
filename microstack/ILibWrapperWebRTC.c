@@ -446,7 +446,7 @@ void ILibWrapper_WebRTC_InitializeCrypto(ILibWrapper_WebRTC_ConnectionFactoryStr
 		util_openssl_init();
 
 		// Init DTLS
-#ifdef _MINCORE
+#if defined(_MINCORE) && OPENSSL_VERSION_NUMBER < 0x30000000L
 		factory->ctx = SSL_CTX_new(DTLSv1_method());
 #else
 		factory->ctx = SSL_CTX_new(DTLS_method());
