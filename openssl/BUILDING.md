@@ -88,6 +88,12 @@ verifies the tarball checksum, checks that the `OPENSSL_NO_*` feature set matche
 `libstatic/bsd/<arch>`. Run it on the same base image the agent is built on in
 `.github/workflows/linux-build.yml` (debian:bookworm for `aarch64`, the armv6 Raspbian image for
 `armhf`, FreeBSD 13.5 for `freebsd_x86-64`) so the library shares the agent's libc baseline.
+On Debian/Ubuntu the script needs `build-essential perl curl`, plus `libc6-dev-i386 gcc-multilib`
+for `x86` (the `-m32` include path needs the `asm/` headers that `gcc-multilib` provides) and
+`musl-tools` for `alpine-x86-64` (the script appends the host kernel headers after musl's with
+`-idirafter`, the same way `MUSL_CC` does in the top-level makefile). Without GitHub Actions, the
+same images run locally under Docker (Colima with Rosetta on Apple silicon; `tonistiigi/binfmt
+--install arm` for the armv6 container): mount the checkout at `/src` and run the script inside.
 
 The remaining `libstatic/linux/*` directories (mips, poky, pogo, ...) are legacy upstream targets
 that this fork does not build; the `openssl-<arch>` scripts next to them document the original

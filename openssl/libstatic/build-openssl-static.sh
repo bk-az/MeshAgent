@@ -51,10 +51,15 @@ COMMON_OPTS="no-shared no-module no-dso no-weak-ssl-ciphers no-srp no-psk no-com
 no-err no-rc5 no-idea no-md4 no-rmd160 no-seed no-camellia no-bf no-cast no-md2 no-mdc2 \
 no-tests no-apps no-docs no-asm --api=1.1.0"
 
+EXTRA_OPTS=""
 case "$ARCH" in
 	x86)            TARGET=linux-x86;     OUT="$HERE/linux/$ARCH" ;;
 	x86-64)         TARGET=linux-x86_64;  OUT="$HERE/linux/$ARCH" ;;
-	alpine-x86-64)  TARGET=linux-x86_64;  OUT="$HERE/linux/$ARCH"; CC="${CC:-musl-gcc}"; export CC ;;
+	alpine-x86-64)  TARGET=linux-x86_64;  OUT="$HERE/linux/$ARCH"; CC="${CC:-musl-gcc}"; export CC
+		# Debian/Ubuntu musl-gcc runs the host gcc with -nostdinc and only musl's include path, so
+		# the kernel headers (<linux/mman.h>, <asm/*>) are missing. Append the host directories
+		# after musl's, exactly like MUSL_CC in the top-level makefile; on Alpine CC is plain gcc.
+		case "$CC" in musl-gcc*) EXTRA_OPTS="-idirafter /usr/include/x86_64-linux-gnu -idirafter /usr/include" ;; esac ;;
 	arm64|aarch64)  TARGET=linux-aarch64; OUT="$HERE/linux/$ARCH" ;;
 	armhf)          TARGET=linux-armv4;   OUT="$HERE/linux/$ARCH" ;;
 	freebsd_x86-64) TARGET=BSD-x86_64;    OUT="$HERE/bsd/$ARCH" ;;
@@ -115,7 +120,7 @@ tar xzf "$TARBALL" -C "$SRC"
 SRC="$SRC/openssl-$VERSION"
 
 echo "==> Configuring $ARCH ($TARGET) with CC=${CC:-<default>}"
-(cd "$SRC" && ./Configure "$TARGET" $COMMON_OPTS > configure.log 2>&1) || { cat "$SRC/configure.log"; exit 1; }
+(cd "$SRC" && ./Configure "$TARGET" $COMMON_OPTS $EXTRA_OPTS > configure.log 2>&1) || { cat "$SRC/configure.log"; exit 1; }
 echo "==> Building $ARCH with $MAKE -j$JOBS"
 (cd "$SRC" && "$MAKE" -j"$JOBS" build_libs > build.log 2>&1) || { tail -50 "$SRC/build.log"; exit 1; }
 
