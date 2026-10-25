@@ -149,6 +149,11 @@ void  __fastcall util_free(char* ptr);
 // Certificate & crypto methods
 void  __fastcall util_freecert(struct util_cert* cert);
 int   __fastcall util_to_p12(struct util_cert cert, char *password, char** data);
+// util_from_p12() returns 1 on success, 0 when the blob cannot be parsed, or
+// UTIL_P12_LEGACY_UNAVAILABLE when parsing failed and the OpenSSL "legacy" provider (needed for
+// the RC2-40 PKCS#12 that OpenSSL 1.1.x wrote) could not be loaded. On that last result the data
+// may well be a valid identity this build simply cannot decrypt, so callers must not discard it.
+#define UTIL_P12_LEGACY_UNAVAILABLE (-1)
 int   __fastcall util_from_p12(char* data, int datalen, char* password, struct util_cert* cert);
 int   __fastcall util_to_cer(struct util_cert cert, char** data);
 int   __fastcall util_from_cer(char* data, int datalen, struct util_cert* cert);

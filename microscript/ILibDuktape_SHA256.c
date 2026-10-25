@@ -225,7 +225,7 @@ duk_ret_t ILibDuktape_SHA256_SIGNER_Create(duk_context *ctx)
 		duk_push_fixed_buffer(ctx, sizeof(struct util_cert));				// [signer][buffer]
 		cert = (struct util_cert*)Duktape_GetBuffer(ctx, -1, NULL);
 		duk_put_prop_string(ctx, -2, ILibDuktape_SHA256_SIGNER_CERT);		// [signer]
-		if (util_from_p12(pfx, (int)pfxLen, passphrase, cert) == 0)
+		if (util_from_p12(pfx, (int)pfxLen, passphrase, cert) <= 0)
 		{
 			return(ILibDuktape_Error(ctx, "Invalid PFX/Passphrase"));
 		}

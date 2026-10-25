@@ -1247,8 +1247,9 @@ void ILibProcessAsyncSocket(struct ILibAsyncSocketModule *Reader, int pendingRea
 						while ((sslerror = ERR_get_error()) != 0)
 						{
 							ERR_error_string_n(sslerror, ILibScratchPad, sizeof(ILibScratchPad));
+							ILibRemoteLogging_printf(ILibChainGetLogger(Reader->Transport.ChainLink.ParentChain), ILibRemoteLogging_Modules_Microstack_AsyncSocket | ILibRemoteLogging_Modules_ConsolePrint,
+								ILibRemoteLogging_Flags_VerbosityLevel_1, "AsyncSocket[%p] TLS handshake failed: %s", (void*)Reader, ILibScratchPad);
 						}
-						// TODO: We should probably do something
 						break;
 					case 1:
 						Reader->SSLConnect = Reader->TLSHandshakeCompleted = 1;
@@ -1266,6 +1267,13 @@ void ILibProcessAsyncSocket(struct ILibAsyncSocketModule *Reader, int pendingRea
 						sslerror = SSL_get_error(Reader->ssl, sslerror);
 						if (sslerror == SSL_ERROR_SSL)
 						{
+							// Log the OpenSSL reason (e.g. certificate verify failed) before the socket is torn down
+							while ((sslerror = ERR_get_error()) != 0)
+							{
+								ERR_error_string_n(sslerror, ILibScratchPad, sizeof(ILibScratchPad));
+								ILibRemoteLogging_printf(ILibChainGetLogger(Reader->Transport.ChainLink.ParentChain), ILibRemoteLogging_Modules_Microstack_AsyncSocket | ILibRemoteLogging_Modules_ConsolePrint,
+									ILibRemoteLogging_Flags_VerbosityLevel_1, "AsyncSocket[%p] TLS handshake failed: %s", (void*)Reader, ILibScratchPad);
+							}
 							Reader->TLS_HandshakeError_Occurred = 1;
 							bytesReceived = -1;
 						}
@@ -1303,6 +1311,17 @@ void ILibProcessAsyncSocket(struct ILibAsyncSocketModule *Reader, int pendingRea
 					if (j < 0)
 					{
 						sslerror = SSL_get_error(Reader->ssl, j);
+						if (sslerror == SSL_ERROR_SSL)
+						{
+							// A fatal TLS error after the handshake: report the reason, the connection is unusable from here on
+							unsigned long e;
+							while ((e = ERR_get_error()) != 0)
+							{
+								ERR_error_string_n(e, ILibScratchPad, sizeof(ILibScratchPad));
+								ILibRemoteLogging_printf(ILibChainGetLogger(Reader->Transport.ChainLink.ParentChain), ILibRemoteLogging_Modules_Microstack_AsyncSocket | ILibRemoteLogging_Modules_ConsolePrint,
+									ILibRemoteLogging_Flags_VerbosityLevel_1, "AsyncSocket[%p] TLS read failed: %s", (void*)Reader, ILibScratchPad);
+							}
+						}
 						if (Reader->writeBioBuffer->length > 0)
 						{
 							ILibAsyncSocket_ProcessEncryptedBuffer(Reader);

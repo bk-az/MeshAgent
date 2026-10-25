@@ -70,6 +70,45 @@ function prepareFolders(folderPath)
     }
 }
 
+// Restrict read access on the agent's identity store (.db) to the service account and administrators.
+// The store holds the node's certificates and private keys, and would otherwise inherit the
+// world-readable permissions of the install folder. The agent enforces this itself on every start;
+// this covers a pre-existing .db during install/upgrade.
+function restrictDataStorePermissions(dbPath)
+{
+    try
+    {
+        if (!require('fs').existsSync(dbPath)) { return; }
+        if (process.platform == 'win32')
+        {
+            // The path stays quoted: ILibProcessPipe joins the arguments with plain spaces, so an unquoted
+            // path under "Program Files" would reach icacls as two arguments. The ACEs mirror
+            // ILibSimpleDataStore_RestrictPermissions() in the agent (SYSTEM + Administrators, full control,
+            // inheritance removed); no owner entry is needed here because this runs elevated, i.e. as a
+            // member of Administrators.
+            var child = require('child_process').execFile(process.env['windir'] + '\\system32\\icacls.exe',
+                ['icacls', '"' + dbPath + '"', '/inheritance:r', '/grant:r', '*S-1-5-18:F', '*S-1-5-32-544:F']);
+            child.stdout.str = ''; child.stdout.on('data', function (c) { this.str += c.toString(); });
+            child.stderr.str = ''; child.stderr.on('data', function (c) { this.str += c.toString(); });
+            child.on('exit', function (c) { this.exitCode = c; });
+            child.waitExit();
+            if (child.exitCode != 0)
+            {
+                throw ('icacls exited with code ' + child.exitCode + ': ' + (child.stderr.str + child.stdout.str).trim());
+            }
+        }
+        else
+        {
+            require('fs').chmodSync(dbPath, require('fs').CHMOD_MODES.S_IRUSR | require('fs').CHMOD_MODES.S_IWUSR);
+        }
+        console.info1('Restricted permissions on ' + dbPath);
+    }
+    catch (e)
+    {
+        console.info1('Unable to restrict permissions on ' + dbPath + ': ' + e);
+    }
+}
+
 function parseServiceStatus(token)
 {
     var j = {};
@@ -2334,6 +2373,7 @@ function serviceManager()
             }
 
             console.info1('   Install Path = ' + options.installPath);
+            restrictDataStorePermissions(options.installPath + options.target + '.db');
             console.info1('   OpenSCManagerA()');
             var servicePath = this.GM.CreateVariable('"' + options.servicePath + '"', { wide: true });
             var handle = this.proxy.OpenSCManagerA(0x00, 0x00, 0x0002);
@@ -2475,6 +2515,7 @@ function serviceManager()
             var m = require('fs').statSync(options.installPath + options.target).mode;
             m |= (require('fs').CHMOD_MODES.S_IXUSR | require('fs').CHMOD_MODES.S_IXGRP | require('fs').CHMOD_MODES.S_IXOTH);
             require('fs').chmodSync(options.installPath + options.target, m);
+            restrictDataStorePermissions(options.installPath + options.target + '.db');
         }
         if (process.platform == 'freebsd')
         {

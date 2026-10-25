@@ -1,0 +1,133 @@
+<#
+.SYNOPSIS
+  Builds the static OpenSSL libraries used by the Windows projects (openssl/libstatic/*.lib).
+
+.DESCRIPTION
+  Run from a Visual Studio "Native Tools" developer prompt (or after vcvarsall) whose target
+  architecture matches -Platform. Perl must be on PATH (Strawberry Perl is fine); NASM is not
+  needed because the libraries are built with no-asm, like the previous 1.1.1 ones.
+
+  Builds a release and a debug variant (both static, /MT /Zl, so the linking project's
+  /MT or /MTd setting decides the C runtime) and copies them over
+    x64   -> libcrypto64MT.lib  libssl64MT.lib  libcrypto64MTd.lib  libssl64MTd.lib
+    x86   -> libcrypto32MT.lib  libssl32MT.lib  libcrypto32MTd.lib  libssl32MTd.lib
+    ARM64 -> libcryptoARM64.lib libsslARM64.lib libcryptoARM64d.lib libsslARM64d.lib
+
+  The tarball is verified against the SHA-256 pinned in this script (falling back to the .sha256
+  published on the OpenSSL GitHub release page for versions that are not pinned).
+
+.EXAMPLE
+  pwsh openssl/libstatic/build-openssl-windows.ps1 -Platform x64
+  pwsh openssl/libstatic/build-openssl-windows.ps1 -Platform ARM64 -Version 3.5.9
+#>
+param(
+	[Parameter(Mandatory = $true)][ValidateSet('x64', 'x86', 'ARM64')][string]$Platform,
+	[string]$Version = '3.5.9',
+	[string]$Tarball = $env:OPENSSL_TARBALL
+)
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'   # the 5.1 progress bar makes downloads very slow
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
+$Here = Split-Path -Parent $MyInvocation.MyCommand.Path
+foreach ($tool in 'cl', 'nmake', 'perl') {
+	if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) { throw "$tool not found on PATH; run from a VS developer prompt with Perl installed" }
+}
+
+# Keep in sync with COMMON_OPTS in build-openssl-static.sh / macos/build-openssl-macos.sh.
+$CommonOpts = @('no-shared', 'no-module', 'no-dso', 'no-weak-ssl-ciphers', 'no-srp', 'no-psk', 'no-comp',
+	'no-zlib', 'no-zlib-dynamic', 'no-err', 'no-rc5', 'no-idea', 'no-md4', 'no-rmd160', 'no-seed',
+	'no-camellia', 'no-bf', 'no-cast', 'no-md2', 'no-mdc2', 'no-tests', 'no-apps', 'no-docs', 'no-asm',
+	'--api=1.1.0')
+# Windows only: target Windows 7+. At _WIN32_WINNT >= 0x0600 OpenSSL seeds its DRBG through
+# BCryptGenRandom (rand_win.c) instead of CryptAcquireContext/CryptGenRandom. The CryptoAPI path
+# needs %SystemRoot% in the process environment to locate the CSP DLL and fails in children spawned
+# with a minimal explicit environment, which is what the SystemRoot injection in ILibProcessPipe.c
+# and the util_random() OS fallback work around. Libraries built before this define was added
+# (before 3a0265d) used CryptGenRandom; `strings libcrypto64MT.lib | grep BCryptGenRandom` tells them apart.
+$WinOpts = @('-D_WIN32_WINNT=0x0601')
+
+# SHA-256 of each release tarball this repository has been built against, recorded here so the
+# check does not depend on the host the tarball came from (the .sha256 next to the release only
+# catches a corrupt download, not a tampered release). Keep in sync with the same table in
+# build-openssl-static.sh and macos/build-openssl-macos.sh. When adding a version, take the hash
+# from https://www.openssl.org/source/ and check the release .asc against the OpenSSL signing key
+# before recording it.
+$KnownSha256 = @{
+	'3.5.9' = '603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a'
+}
+
+switch ($Platform) {
+	'x64'   { $Target = 'VC-WIN64A';   $Suffix = '64MT';  $DebugSuffix = '64MTd' }
+	'x86'   { $Target = 'VC-WIN32';    $Suffix = '32MT';  $DebugSuffix = '32MTd' }
+	'ARM64' { $Target = 'VC-WIN64-ARM'; $Suffix = 'ARM64'; $DebugSuffix = 'ARM64d' }
+}
+
+$Work = Join-Path ([System.IO.Path]::GetTempPath()) ("openssl-build-" + [System.IO.Path]::GetRandomFileName())
+New-Item -ItemType Directory -Path $Work | Out-Null
+try {
+	$BaseUrl = "https://github.com/openssl/openssl/releases/download/openssl-$Version"
+	if (-not $Tarball) {
+		$Tarball = Join-Path $Work "openssl-$Version.tar.gz"
+		Write-Host "Downloading openssl-$Version.tar.gz"
+		Invoke-WebRequest -UseBasicParsing -Uri "$BaseUrl/openssl-$Version.tar.gz" -OutFile $Tarball
+	}
+	if ($KnownSha256.ContainsKey($Version)) {
+		$Expected = $KnownSha256[$Version]
+	} else {
+		Write-Warning "No pinned SHA-256 for openssl-$Version in this script; falling back to the checksum published with the release"
+		# Download the checksum to a file: Windows PowerShell 5.1 returns binary content as a byte
+		# array for this file's MIME type, so .Content cannot be used as a string.
+		$ShaFile = Join-Path $Work 'expected.sha256'
+		Invoke-WebRequest -UseBasicParsing -Uri "$BaseUrl/openssl-$Version.tar.gz.sha256" -OutFile $ShaFile
+		$Expected = ((Get-Content $ShaFile -Raw).Trim() -split '\s+')[0].ToLower()
+	}
+	$Actual = (Get-FileHash -Algorithm SHA256 $Tarball).Hash.ToLower()
+	if ($Expected -ne $Actual) { throw "SHA256 mismatch for ${Tarball}: expected $Expected, actual $Actual" }
+	Write-Host "Verified openssl-$Version.tar.gz ($Actual)"
+
+	$Vendored = Join-Path $Here '..\include\openssl\configuration.h'
+
+	foreach ($variant in @(@{ Name = 'release'; Extra = @();          Suffix = $Suffix },
+	                        @{ Name = 'debug';   Extra = @('--debug'); Suffix = $DebugSuffix })) {
+		$Src = Join-Path $Work $variant.Name
+		New-Item -ItemType Directory -Path $Src | Out-Null
+		tar -xzf $Tarball -C $Src --strip-components=1
+		if ($LASTEXITCODE -ne 0) { throw "tar failed" }
+		Push-Location $Src
+		try {
+			Write-Host "==> Configuring $Platform $($variant.Name) ($Target)"
+			$configureArgs = @($Target) + $CommonOpts + $WinOpts + @($variant.Extra)
+			& perl Configure @configureArgs
+			if ($LASTEXITCODE -ne 0) { throw "Configure failed" }
+			Write-Host "==> Building $Platform $($variant.Name)"
+			& nmake build_libs
+			if ($LASTEXITCODE -ne 0) { throw "nmake failed" }
+
+			# The vendored headers come from the macOS build; the feature set must match.
+			if (Test-Path $Vendored) {
+				# Ignored: no-asm, and the engines/loaders OpenSSL enables per OS (Windows cert store,
+				# Linux AF_ALG, BSD /dev/crypto); none of them affect the public headers.
+				$filter = { $_ -match '^#\s*define OPENSSL_NO_' -and $_ -notmatch 'OPENSSL_NO_(ASM|WINSTORE|AFALGENG|DEVCRYPTOENG)\b' }
+				$built = Get-Content 'include\openssl\configuration.h' | Where-Object $filter | ForEach-Object { $_ -replace '\s+', ' ' } | Sort-Object
+				$vend  = Get-Content $Vendored | Where-Object $filter | ForEach-Object { $_ -replace '\s+', ' ' } | Sort-Object
+				$diff = Compare-Object $vend $built
+				if ($diff) { $diff | Format-Table | Out-String | Write-Host; throw "OPENSSL_NO_* feature set differs from the vendored configuration.h" }
+			}
+
+			# OpenSSL compiles static libraries with /MT /Zl: /Zl strips the runtime-library
+			# directive from every object, so a correct build carries *no* LIBCMT/LIBCMTD directive
+			# and takes the CRT from the linking project (/MT or /MTd in the .vcxproj). Only a
+			# dynamic-runtime directive (MSVCRT / MSVCRTD) would indicate a wrong (/MD) build.
+			$directives = (& dumpbin /directives libcrypto.lib) -join "`n"
+			if ($directives -match 'DEFAULTLIB:"?MSVCRTD?"?') { throw "libcrypto.lib references the dynamic CRT (MSVCRT); expected a static /MT /Zl build" }
+
+			Copy-Item libcrypto.lib (Join-Path $Here "libcrypto$($variant.Suffix).lib") -Force
+			Copy-Item libssl.lib    (Join-Path $Here "libssl$($variant.Suffix).lib")    -Force
+			Write-Host "==> Installed libcrypto$($variant.Suffix).lib and libssl$($variant.Suffix).lib"
+		} finally { Pop-Location }
+	}
+	Write-Host "Done."
+} finally {
+	Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue
+}

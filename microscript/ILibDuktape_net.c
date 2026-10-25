@@ -2125,7 +2125,17 @@ int ILibDuktape_TLS_verify(int preverify_ok, X509_STORE_CTX *storectx)
 		ILibDuktape_TLS_X509_PUSH(data->ctx, sk_X509_value(certChain, i));					// [Socket][Options][func][this][certs][cert]
 		duk_put_prop_index(data->ctx, -2, i);												// [Socket][Options][func][this][certs]
 	}
-	retVal = duk_pcall_method(data->ctx, 1) == 0 ? 1 : 0;									// [Socket][Options][undefined]
+	if (duk_pcall_method(data->ctx, 1) == 0)												// [Socket][Options][undefined/error]
+	{
+		retVal = 1;
+	}
+	else
+	{
+		// Make a rejected server certificate visible instead of silently failing the handshake
+		ILibRemoteLogging_printf(ILibChainGetLogger(Duktape_GetChain(data->ctx)), ILibRemoteLogging_Modules_Microstack_Generic | ILibRemoteLogging_Modules_ConsolePrint,
+			ILibRemoteLogging_Flags_VerbosityLevel_1, "TLS: checkServerIdentity rejected the server certificate (%d cert(s) in chain, preverify=%d): %s",
+			sk_X509_num(certChain), preverify_ok, (char*)duk_safe_to_string(data->ctx, -1));
+	}
 	duk_pop_3(data->ctx);																	// ...
 
 	return retVal;
@@ -2635,62 +2645,62 @@ duk_ret_t ILibDuktape_TLS_createSecureContext(duk_context *ctx)
 	if (secureProtocolLen == 13 && strncmp(secureProtocol, "SSLv23_method", 13) == 0)
 	{
 		ssl_ctx = SSL_CTX_new(TLS_method());
-		SSL_CTX_set_options(ssl_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1);
+		SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1);
 	}
 	else if (secureProtocolLen == 20 && strncmp(secureProtocol, "SSLv23_client_method", 20) == 0)
 	{
 		ssl_ctx = SSL_CTX_new(TLS_method());
-		SSL_CTX_set_options(ssl_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1);
+		SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1);
 	}
 	else if (secureProtocolLen == 20 && strncmp(secureProtocol, "SSLv23_server_method", 20) == 0)
 	{
 		ssl_ctx = SSL_CTX_new(TLS_method());
-		SSL_CTX_set_options(ssl_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1);
+		SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1);
 	}
 	else if (secureProtocolLen == 12 && strncmp(secureProtocol, "TLSv1_method", 12) == 0)
 	{
 		ssl_ctx = SSL_CTX_new(TLS_method());
-		SSL_CTX_set_options(ssl_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1_1 | SSL_OP_NO_TLSv1_2);
+		SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1_1 | SSL_OP_NO_TLSv1_2);
 	}
 	else if (secureProtocolLen == 19 && strncmp(secureProtocol, "TLSv1_client_method", 19) == 0)
 	{
 		ssl_ctx = SSL_CTX_new(TLS_method());
-		SSL_CTX_set_options(ssl_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1_1 | SSL_OP_NO_TLSv1_2);
+		SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1_1 | SSL_OP_NO_TLSv1_2);
 	}
 	else if (secureProtocolLen == 19 && strncmp(secureProtocol, "TLSv1_server_method", 19) == 0)
 	{
 		ssl_ctx = SSL_CTX_new(TLS_method());
-		SSL_CTX_set_options(ssl_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1_1 | SSL_OP_NO_TLSv1_2);
+		SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1_1 | SSL_OP_NO_TLSv1_2);
 	}
 	else if (secureProtocolLen == 14 && strncmp(secureProtocol, "TLSv1_1_method", 14) == 0)
 	{
 		ssl_ctx = SSL_CTX_new(TLS_method());
-		SSL_CTX_set_options(ssl_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_2);
+		SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_2);
 	}
 	else if (secureProtocolLen == 21 && strncmp(secureProtocol, "TLSv1_1_client_method", 21) == 0)
 	{
 		ssl_ctx = SSL_CTX_new(TLS_method());
-		SSL_CTX_set_options(ssl_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_2);
+		SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_2);
 	}
 	else if (secureProtocolLen == 21 && strncmp(secureProtocol, "TLSv1_1_server_method", 21) == 0)
 	{
 		ssl_ctx = SSL_CTX_new(TLS_method());
-		SSL_CTX_set_options(ssl_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_2);
+		SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_2);
 	}
 	else if (secureProtocolLen == 14 && strncmp(secureProtocol, "TLSv1_2_method", 14) == 0)
 	{
 		ssl_ctx = SSL_CTX_new(TLS_method());
-		SSL_CTX_set_options(ssl_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_1);
+		SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_1);
 	}
 	else if (secureProtocolLen == 21 && strncmp(secureProtocol, "TLSv1_2_client_method", 21) == 0)
 	{
 		ssl_ctx = SSL_CTX_new(TLS_method());
-		SSL_CTX_set_options(ssl_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_1);
+		SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_1);
 	}
 	else if (secureProtocolLen == 21 && strncmp(secureProtocol, "TLSv1_2_server_method", 21) == 0)
 	{
 		ssl_ctx = SSL_CTX_new(TLS_method());
-		SSL_CTX_set_options(ssl_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_1);
+		SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_1);
 	}
 	else if (secureProtocolLen == 11 && strncmp(secureProtocol, "DTLS_method", 11) == 0)
 	{
@@ -2707,7 +2717,7 @@ duk_ret_t ILibDuktape_TLS_createSecureContext(duk_context *ctx)
 		duk_get_prop_string(ctx, 0, "pfx");													// [secureContext][pfx]
 		duk_size_t pfxLen;
 		char *pfx = (char*)Duktape_GetBuffer(ctx, -1, &pfxLen);
-		if (util_from_p12(pfx, (int)pfxLen, Duktape_GetStringPropertyValue(ctx, 0, "passphrase", ""), cert) == 0)
+		if (util_from_p12(pfx, (int)pfxLen, Duktape_GetStringPropertyValue(ctx, 0, "passphrase", ""), cert) <= 0)
 		{
 			// Failed to load certificate
 			return(ILibDuktape_Error(ctx, "tls.createSecureContext(): Invalid passphrase"));
@@ -2823,7 +2833,7 @@ duk_ret_t ILibDuktape_TLS_loadCertificate(duk_context *ctx)
 		duk_put_prop_string(ctx, -2, ILibDuktape_TLS_util_cert);
 		if (pfx != NULL)
 		{
-			if (util_from_p12(pfx, (int)pfxLen, Duktape_GetStringPropertyValue(ctx, 0, "passphrase", NULL), cert) == 0)
+			if (util_from_p12(pfx, (int)pfxLen, Duktape_GetStringPropertyValue(ctx, 0, "passphrase", NULL), cert) <= 0)
 			{
 				// Failed to load certificate
 				return(ILibDuktape_Error(ctx, "tls.loadCertificate(): Invalid passphrase"));

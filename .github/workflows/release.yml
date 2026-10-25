@@ -31,11 +31,9 @@ jobs:
   macos:
     needs: validate
     uses: ./.github/workflows/mac-build.yml
-  freebsd:
-    needs: validate
-    uses: ./.github/workflows/freebsd-build.yml
+  # freebsd: not built for now (BSD OpenSSL libraries are still 1.1.1), see freebsd-build.yml
   release:
-    needs: [linux, windows, macos, freebsd]
+    needs: [linux, windows, macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write

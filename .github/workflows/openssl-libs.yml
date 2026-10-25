@@ -1,0 +1,183 @@
+name: OpenSSL static libs
+run-name: Build OpenSSL ${{ inputs.version || '3.5.9' }} static libraries
+
+# Rebuilds every prebuilt OpenSSL library under openssl/libstatic that the other workflows link
+# (Windows x64/x86/ARM64, Linux x86/x86-64/alpine/arm64/aarch64/armhf, FreeBSD, OpenBSD) and
+# publishes them as artifacts. Download the artifacts, drop the files into openssl/libstatic
+# and commit them together with the matching headers (see openssl/BUILDING.md).
+#
+# The macOS libraries (and the vendored headers) are built locally with
+# openssl/libstatic/macos/build-openssl-macos.sh and are not part of this workflow.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: OpenSSL version (release tag openssl-<version> on GitHub)
+        default: "3.5.9"
+        required: true
+  # Also build when the scripts or this file change, so the workflow is indexed by GitHub and
+  # a failed run can simply be re-run; the version then falls back to the default below.
+  push:
+    paths:
+      - .github/workflows/openssl-libs.yml
+      - openssl/libstatic/build-openssl-static.sh
+      - openssl/libstatic/build-openssl-windows.ps1
+
+env:
+  OPENSSL_VERSION: ${{ inputs.version || '3.5.9' }}
+
+# The output of this workflow is committed and statically linked into an agent that runs as
+# root/SYSTEM, so: least-privilege token, third-party actions pinned to commit SHAs and container
+# images pinned to digests, so a retagged action or image cannot change the libraries silently.
+# To update a pin: `gh api repos/<owner>/<repo>/git/ref/tags/<tag> --jq .object.sha` for an
+# action, `docker buildx imagetools inspect <image>:<tag>` for an image.
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows ${{ matrix.platform }}
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: x64
+            vsarch: x64
+            files: "openssl/libstatic/*64MT*.lib"
+          - platform: x86
+            vsarch: x86
+            files: "openssl/libstatic/*32MT*.lib"
+          - platform: ARM64
+            vsarch: amd64_arm64
+            files: "openssl/libstatic/*ARM64*.lib"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up MSVC (${{ matrix.vsarch }})
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        with:
+          arch: ${{ matrix.vsarch }}
+      - name: Build OpenSSL ${{ env.OPENSSL_VERSION }} for ${{ matrix.platform }}
+        shell: pwsh
+        run: ./openssl/libstatic/build-openssl-windows.ps1 -Platform ${{ matrix.platform }} -Version $env:OPENSSL_VERSION
+      - name: Check embedded version banner
+        shell: pwsh
+        run: |
+          foreach ($f in (Get-ChildItem ${{ matrix.files }} | Where-Object Name -like 'libcrypto*')) {   # libssl has no banner
+            if (-not (Select-String -Path $f -Pattern "OpenSSL $env:OPENSSL_VERSION" -Quiet)) { throw "$f does not contain the OpenSSL $env:OPENSSL_VERSION banner" }
+            Write-Host "$($f.Name): OpenSSL $env:OPENSSL_VERSION"
+          }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: openssl-windows-${{ matrix.platform }}
+          path: ${{ matrix.files }}
+          if-no-files-found: error
+
+  linux-x86:
+    name: Linux x86, x86-64, alpine-x86-64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install packages
+        run: |
+          sudo apt-get update &&
+          sudo apt-get install -y build-essential musl-tools libc6-dev-i386 gcc-multilib
+      - name: Build x86-64
+        run: ./openssl/libstatic/build-openssl-static.sh x86-64 $OPENSSL_VERSION
+      - name: Build x86
+        run: ./openssl/libstatic/build-openssl-static.sh x86 $OPENSSL_VERSION
+      - name: Build alpine-x86-64 (musl)
+        run: ./openssl/libstatic/build-openssl-static.sh alpine-x86-64 $OPENSSL_VERSION
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: openssl-linux-x86
+          path: |
+            openssl/libstatic/linux/x86/*.a
+            openssl/libstatic/linux/x86-64/*.a
+            openssl/libstatic/linux/alpine-x86-64/*.a
+          if-no-files-found: error
+
+  linux-arm64:
+    name: Linux arm64 (native) and aarch64 (bookworm container)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install packages
+        run: sudo apt-get update && sudo apt-get install -y build-essential
+      - name: Build arm64 (ARCHID=26)
+        run: ./openssl/libstatic/build-openssl-static.sh arm64 $OPENSSL_VERSION
+      # ARCHID=32 is built in debian:bookworm by linux-build.yml so the agent keeps the glibc
+      # 2.36 floor; build the library in the same image.
+      - name: Build aarch64 (ARCHID=32) in debian:bookworm
+        run: |
+          docker run --rm -e OPENSSL_VERSION -v "${{ github.workspace }}":/src -w /src debian:bookworm@sha256:854dd8ab51d62866dbd8f5431d15ce77b12983a2a4a1e1fe43a2395dc7ef9f61 bash -c '
+            apt-get update && apt-get install -y build-essential perl curl ca-certificates binutils &&
+            ./openssl/libstatic/build-openssl-static.sh aarch64 $OPENSSL_VERSION
+          '
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: openssl-linux-arm64
+          path: |
+            openssl/libstatic/linux/arm64/*.a
+            openssl/libstatic/linux/aarch64/*.a
+          if-no-files-found: error
+
+  linux-armhf:
+    name: Linux armhf (armv6 Raspbian container)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Enable 32-bit ARM emulation
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+        with:
+          platforms: arm
+      # Same image as the ARCHID=25 agent build in linux-build.yml (armv6 hardfloat, glibc 2.31).
+      - name: Build armhf (ARCHID=25) in an armv6 container
+        run: |
+          docker run --rm -e OPENSSL_VERSION --platform linux/arm/v6 --entrypoint /bin/bash -v "${{ github.workspace }}":/src -w /src balenalib/rpi-raspbian:bullseye@sha256:851cfc48b26f6413a72a7f6873a7624ba2a427048976f6ab4483f72fe165d4f1 -c '
+            apt-get update && apt-get install -y build-essential perl curl ca-certificates binutils &&
+            ./openssl/libstatic/build-openssl-static.sh armhf $OPENSSL_VERSION
+          '
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: openssl-linux-armhf
+          path: openssl/libstatic/linux/armhf/*.a
+          if-no-files-found: error
+
+  freebsd:
+    name: FreeBSD x86_64 (ARCHID=30)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Same release as freebsd-build.yml so the library and the agent share one baseline.
+      - name: Build in FreeBSD VM
+        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
+        with:
+          release: "13.5"
+          envs: "OPENSSL_VERSION"
+          prepare: pkg install -y gmake perl5 curl
+          run: ./openssl/libstatic/build-openssl-static.sh freebsd_x86-64 $OPENSSL_VERSION
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: openssl-freebsd
+          path: openssl/libstatic/bsd/freebsd_x86-64/*.a
+          if-no-files-found: error
+
+  openbsd:
+    name: OpenBSD x86_64 (ARCHID=37)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build in OpenBSD VM
+        uses: vmactions/openbsd-vm@f1ca8bc8ecc5b6ef7218e5b914836e067e1546d3 # v1.4.9
+        with:
+          envs: "OPENSSL_VERSION"
+          prepare: pkg_add gmake curl
+          run: ./openssl/libstatic/build-openssl-static.sh openbsd_x86-64 $OPENSSL_VERSION
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: openssl-openbsd
+          path: openssl/libstatic/bsd/openbsd_x86-64/*.a
+          if-no-files-found: error

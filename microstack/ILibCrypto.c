@@ -34,6 +34,9 @@ limitations under the License.
 #include <openssl/rand.h>
 #include <openssl/err.h>
 #include <openssl/hmac.h>
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+#include <openssl/provider.h>
+#endif
 #if defined(_POSIX) || defined(__APPLE__)
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -247,10 +250,59 @@ size_t __fastcall util_hexToBuf(char *hexString, size_t hexStringLength, char* o
 #ifdef MICROSTACK_NOTLS
 int util_random_seeded = 0;
 #endif
+
+#ifndef MICROSTACK_NOTLS
+// OS-level RNG fallback used when OpenSSL's RAND_bytes() fails. OpenSSL 3's DRBG never
+// instantiates (and RAND_bytes() returns 0, leaving the buffer untouched) when its entropy
+// poll fails -- most notably in a child process spawned with an explicit environment that is
+// missing SystemRoot, which breaks the legacy CryptAcquireContext()/CryptGenRandom() path on
+// Windows. Callers like util_random() spin forever on the all-zero buffer in that case, so we
+// fall back to an OS source that does not depend on the process environment. Returns 1 on
+// success (buffer fully filled), 0 on failure.
+static int util_random_os_fallback(int length, char* result)
+{
+#if defined(WIN32) && !defined(_MINCORE)
+	// RtlGenRandom (SystemFunction036) in advapi32: needs no SystemRoot, no CSP, no registry.
+	HMODULE g_hAdvLib = NULL;
+	BOOLEAN(APIENTRY *g_RtlGenRandomPtr)(void*, ULONG) = NULL;
+	int ok = 0;
+	if ((g_hAdvLib = LoadLibraryExA((LPCSTR)"ADVAPI32.DLL", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32)) != NULL)
+	{
+		g_RtlGenRandomPtr = (BOOLEAN(APIENTRY *)(void*, ULONG))GetProcAddress(g_hAdvLib, "SystemFunction036");
+		if (g_RtlGenRandomPtr != NULL && g_RtlGenRandomPtr(result, (ULONG)length) != 0) { ok = 1; }
+		FreeLibrary(g_hAdvLib);
+	}
+	return(ok);
+#elif defined(_POSIX)
+	// /dev/urandom never blocks and does not depend on the process environment.
+	FILE *pFile = fopen("/dev/urandom", "rb");
+	if (pFile != NULL)
+	{
+		size_t got = fread(result, 1, (size_t)length, pFile);
+		fclose(pFile);
+		if (got == (size_t)length) { return(1); }
+	}
+	return(0);
+#else
+	UNREFERENCED_PARAMETER(length);
+	UNREFERENCED_PARAMETER(result);
+	return(0);
+#endif
+}
+#endif
+
 void __fastcall util_random(int length, char* result)
 {
 #ifndef MICROSTACK_NOTLS
-	RAND_bytes((unsigned char*)result, length);
+	if (RAND_bytes((unsigned char*)result, length) != 1)
+	{
+		// OpenSSL's RNG failed and left the buffer untouched. Never return silently with
+		// unfilled (zero) output -- fall back to the OS RNG, and only abort if that also fails.
+		if (util_random_os_fallback(length, result) != 1)
+		{
+			ILIBCRITICALEXITMSG(254, "util_random: RAND_bytes() failed and OS RNG fallback is unavailable");
+		}
+	}
 #else
 	short val;
 	int i;
@@ -482,7 +534,11 @@ void __fastcall util_openssl_init()
 	OpenSSL_add_all_ciphers();		// OpenSSL 1.1
 	OpenSSL_add_all_digests();		// OpenSSL 1.1
 #ifdef FIPSMODE
-	if (FIPS_mode() || FIPS_mode_set(1)) 
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+	if (EVP_default_properties_is_fips_enabled(NULL) || EVP_default_properties_enable_fips(NULL, 1))
+#else
+	if (FIPS_mode() || FIPS_mode_set(1))
+#endif
 	{
 		printf("ENTERED FIPS mode\n"); 
 	}
@@ -586,7 +642,12 @@ static CRITICAL_SECTION g_ILibCrypto_winRootLock;
 // windows variant for a lazy CApath lookup. The same subject can appear more than once in the
 // ROOT store (renewed roots keep the subject but change the key), so walk every match and cache
 // them all in the store -- like OpenSSL's own hash_dir lookup -- and let the verifier pick by key.
+// OpenSSL 3.0 made the subject parameter of X509_LOOKUP_get_by_subject_fn const.
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+static int ILibCrypto_WinGetBySubject(X509_LOOKUP *lu, X509_LOOKUP_TYPE type, const X509_NAME *name, X509_OBJECT *ret)
+#else
 static int ILibCrypto_WinGetBySubject(X509_LOOKUP *lu, X509_LOOKUP_TYPE type, X509_NAME *name, X509_OBJECT *ret)
+#endif
 {
 	const unsigned char *der = NULL;
 	size_t derLen = 0;
@@ -1078,6 +1139,13 @@ int __fastcall util_to_p12(struct util_cert cert, char *password, char** data)
 	return len;
 }
 
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L && defined(OPENSSL_NO_RC2)
+// Identities stored by 1.1.x-era agents are RC2-40 PKCS#12; a libcrypto without RC2 (configured with
+// no-rc2, or without the legacy provider) cannot read them and the agent would re-enroll as a new node.
+// The library must be built with no-module and without no-legacy / no-rc2, see openssl/BUILDING.md.
+#error "OpenSSL was configured without RC2; util_from_p12() needs RC2 via the legacy provider to read stored identities"
+#endif
+
 int __fastcall util_from_p12(char* data, int datalen, char* password, struct util_cert* cert)
 {
 	int r = 0;
@@ -1087,6 +1155,28 @@ int __fastcall util_from_p12(char* data, int datalen, char* password, struct uti
 	cert->pkey = NULL;
 	p12 = d2i_PKCS12(&p12, (const unsigned char**)&data, datalen);
 	r = PKCS12_parse(p12, password, &(cert->pkey), &(cert->x509), NULL);
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+	if (r == 0 && p12 != NULL)
+	{
+		// PKCS#12 blobs written by OpenSSL 1.1.x default to RC2-40 for the certificate bag. OpenSSL 3.x+ only
+		// implements RC2 in the "legacy" provider, so load it on demand (once) and retry, otherwise an upgraded
+		// agent would fail to read its stored certificates and generate a brand new identity.
+		static OSSL_PROVIDER *legacyProvider = NULL;
+		if (legacyProvider == NULL) { legacyProvider = OSSL_PROVIDER_load(NULL, "legacy"); }
+		if (legacyProvider != NULL)
+		{
+			ERR_clear_error();
+			r = PKCS12_parse(p12, password, &(cert->pkey), &(cert->x509), NULL);
+		}
+		else
+		{
+			// This libcrypto has no legacy provider (built without no-module, or with no-legacy), so a valid
+			// 1.1.x identity is indistinguishable from a corrupt blob here. Report that as its own result
+			// instead of a plain parse failure: the caller must not throw the stored identity away on it.
+			r = UTIL_P12_LEGACY_UNAVAILABLE;
+		}
+	}
+#endif
 	PKCS12_free(p12);
 	return r;
 }
@@ -1120,7 +1210,9 @@ int __fastcall util_mkCertEx(struct util_cert *rootcert, struct util_cert* cert,
 	char nameStr[(UTIL_SHA384_HASHSIZE * 2) + 2];
 	BIGNUM *oBigNbr;
 
-	CRYPTO_mem_ctrl(CRYPTO_MEM_CHECK_ON);
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
+	CRYPTO_mem_ctrl(CRYPTO_MEM_CHECK_ON); // No-op since OpenSSL 3.0 (memory debugging was removed)
+#endif
 
 	if (initialcert != NULL)
 	{
@@ -1161,7 +1253,11 @@ int __fastcall util_mkCertEx(struct util_cert *rootcert, struct util_cert* cert,
 	X509_set_pubkey(x, pk);
 
 	// Set the subject name
+#if OPENSSL_VERSION_NUMBER >= 0x40000000L
+	cname = X509_NAME_new(); // X509_get_subject_name() returns a const pointer since OpenSSL 4.0, so build the name and set it below
+#else
 	cname = X509_get_subject_name(x);
+#endif
 
 	if (name == NULL)
 	{
@@ -1177,6 +1273,11 @@ int __fastcall util_mkCertEx(struct util_cert *rootcert, struct util_cert* cert,
 		// This function creates and adds the entry, working out the correct string type and performing checks on its length. Normally we'd check the return value for errors...
 		X509_NAME_add_entry_by_txt(cname, "CN", MBSTRING_ASC, (unsigned char*)name, -1, -1, 0);
 	}
+#if OPENSSL_VERSION_NUMBER >= 0x40000000L
+	X509_set_subject_name(x, cname);
+	X509_NAME_free(cname);
+	cname = (X509_NAME*)X509_get_subject_name(x);
+#endif
 
 	if (rootcert == NULL)
 	{
@@ -1195,7 +1296,7 @@ int __fastcall util_mkCertEx(struct util_cert *rootcert, struct util_cert* cert,
 	else
 	{
 		// This is a sub-certificate
-		cname = X509_get_subject_name(rootcert->x509);
+		cname = (X509_NAME*)X509_get_subject_name(rootcert->x509); // const since OpenSSL 4.0, only read from here
 		X509_set_issuer_name(x, cname);
 
 		// Add usual cert stuff
