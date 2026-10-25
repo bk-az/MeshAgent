@@ -44,7 +44,7 @@ $CommonOpts = @('no-shared', 'no-module', 'no-dso', 'no-weak-ssl-ciphers', 'no-s
 # needs %SystemRoot% in the process environment to locate the CSP DLL and fails in children spawned
 # with a minimal explicit environment, which is what the SystemRoot injection in ILibProcessPipe.c
 # and the util_random() OS fallback work around. Libraries built before this define was added
-# still use CryptGenRandom; `strings libcrypto64MT.lib | grep BCryptGenRandom` tells them apart.
+# (before 3a0265d) used CryptGenRandom; `strings libcrypto64MT.lib | grep BCryptGenRandom` tells them apart.
 $WinOpts = @('-D_WIN32_WINNT=0x0601')
 
 # SHA-256 of each release tarball this repository has been built against, recorded here so the

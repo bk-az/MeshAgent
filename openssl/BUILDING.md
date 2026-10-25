@@ -165,11 +165,11 @@ Summary (OpenSSL 3.5.9):
 The Windows script additionally passes `-D_WIN32_WINNT=0x0601` (Windows 7+), so OpenSSL seeds its
 DRBG through `BCryptGenRandom` instead of the CryptoAPI path, which needs `%SystemRoot%` in the
 process environment and fails in children spawned with a minimal explicit environment (the reason
-for the `SystemRoot` injection in `ILibProcessPipe.c`). The libraries committed on 2026-10-15
-predate that define and still use `CryptGenRandom`; `findstr /M /C:"BCryptGenRandom"
-openssl\libstatic\libcrypto64MT.lib` prints the file name once they are rebuilt with it. If the
-agent link then fails on `BCryptGenRandom`, add `bcrypt.lib` to the linker inputs of the
-`-2022.vcxproj` projects (OpenSSL requests it with a `#pragma comment(lib)`, which `/Zl` may drop).
+for the `SystemRoot` injection in `ILibProcessPipe.c`). The committed libraries have been built
+with it since 3a0265d: `findstr /M /C:"BCryptGenRandom" openssl\libstatic\libcrypto64MT.lib`
+prints the file name. If the agent link ever fails on `BCryptGenRandom`, add `bcrypt.lib` to the
+linker inputs of the `-2022.vcxproj` projects (OpenSSL requests it with a `#pragma comment(lib)`,
+which `/Zl` may drop).
 
 Useful options: `-Platforms x64,x86` to build a subset, `-Version 3.5.10` for another
 release, `-Tarball C:\path\openssl-3.5.9.tar.gz` to reuse a downloaded archive (its

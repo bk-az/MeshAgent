@@ -685,10 +685,12 @@ static pid_t ILibProcessPipe_ForkPTY_BSD(int *amaster, struct termios *termp, st
 #ifdef WIN32
 // Windows environment variables a child needs even when the caller supplies an explicit
 // environment block. Without SystemRoot in particular, the legacy CryptAcquireContext() /
-// CryptGenRandom() entropy path -- used by the OpenSSL static libraries, which target
-// _WIN32_WINNT 0x0501 -- fails because the CSP DLL path in the registry is
+// CryptGenRandom() entropy path -- used by OpenSSL static libraries built for _WIN32_WINNT
+// 0x0501, as ours were until 3a0265d -- fails because the CSP DLL path in the registry is
 // %SystemRoot%\system32\rsaenh.dll. That makes RAND_bytes() fail in the child and (before the
-// util_random() fallback) hung the agent. The rest protect Winsock/side-by-side DLL loading,
+// util_random() fallback) hung the agent. The current libraries target 0x0601 and seed through
+// BCryptGenRandom, which does not need the environment, so for them this is defence in depth
+// (and still what the agent's own code needs). The rest protect Winsock/side-by-side DLL loading,
 // child shell-outs (ComSpec) and temp-file creation. This full list is only for children that run
 // in the agent's own security context (CreateProcessW).
 static const char * const ILibProcessPipe_EssentialWinEnv[] = {
