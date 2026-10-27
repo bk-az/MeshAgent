@@ -87,7 +87,7 @@ the wallpaper, no input) and the Full Disk Access toggle turns itself off.
 `codesign --verify` does not catch this; `build-macos-pkg.js` does.
 
 ```sh
-ID=com.assetsonar.sonarsight.agent
+ID=com.assetsonar.remoteaccess.agent
 codesign --sign "Developer ID Application: Your Org (TEAMID)" --identifier "$ID" \
   --options runtime --timestamp meshagent_osx-arm-64
 codesign --sign "Developer ID Application: Your Org (TEAMID)" --identifier "$ID" \
@@ -106,29 +106,29 @@ keep it stable across releases.
 node packaging/macos/build-macos-pkg.js meshagent_osx-arm-64 dist/arm64 \
   --background ./background.png \
   --company AssetSonar \
-  --service SonarSightAgent \
-  --exe SonarSightAgent \
-  --identifier com.assetsonar.sonarsight \
-  --display-name "Sonar Sight"
+  --service AssetSonarRemoteAccessAgent \
+  --exe AssetSonarRemoteAccessAgent \
+  --identifier com.assetsonar.remoteaccess \
+  --display-name "AssetSonar Remote Access"
 
 
 
 node packaging/macos/build-macos-pkg.js meshagent_osx-x86-64 dist/x86_64 \
   --background ./background.png \
   --company AssetSonar \
-  --service SonarSightAgent \
-  --exe SonarSightAgent \
-  --identifier com.assetsonar.sonarsight \
-  --display-name "Sonar Sight"
+  --service AssetSonarRemoteAccessAgent \
+  --exe AssetSonarRemoteAccessAgent \
+  --identifier com.assetsonar.remoteaccess \
+  --display-name "AssetSonar Remote Access"
 ```
 
-Produces `dist/arm64/SonarSightAgent.pkg` and
-`dist/x86_64/SonarSightAgent.pkg` (unsigned), plus a matching
-`Uninstall.command`, `SonarSightAgent-Uninstall.pkg` and
-`SonarSightAgent-PPPC.mobileconfig` in each folder (see [Privacy permissions
+Produces `dist/arm64/AssetSonarRemoteAccessAgent.pkg` and
+`dist/x86_64/AssetSonarRemoteAccessAgent.pkg` (unsigned), plus a matching
+`Uninstall.command`, `AssetSonarRemoteAccessAgent-Uninstall.pkg` and
+`AssetSonarRemoteAccessAgent-PPPC.mobileconfig` in each folder (see [Privacy permissions
 profile](#privacy-permissions-profile-pppc) below).
 
-`SonarSightAgent-Uninstall.pkg` is a payload-free package whose postinstall is
+`AssetSonarRemoteAccessAgent-Uninstall.pkg` is a payload-free package whose postinstall is
 the uninstaller script. It exists because a double-clicked `.command` is
 refused by Gatekeeper on macOS 15+ and a shell script cannot be notarized,
 whereas a notarized package opens in Installer and runs the script as root.
@@ -137,8 +137,8 @@ agent binary, so it can be rebuilt alone with the same naming flags:
 
 ```sh
 node packaging/macos/build-macos-pkg.js --emit-uninstall-pkg --out dist/universal \
-  --company AssetSonar --service SonarSightAgent --exe SonarSightAgent \
-  --identifier com.assetsonar.sonarsight --display-name SonarSight
+  --company AssetSonar --service AssetSonarRemoteAccessAgent --exe AssetSonarRemoteAccessAgent \
+  --identifier com.assetsonar.remoteaccess --display-name "AssetSonar Remote Access"
 ```
 
 `--version` is the package's own metadata version (the receipt `pkgutil`
@@ -147,7 +147,7 @@ package does.
 
 The `.pkg` filename comes from `--exe` (override with `--pkg-name`), so the
 package and the `.msh` it requires are always named alike --
-`SonarSightAgent.pkg` next to `SonarSightAgent.msh`. `--display-name` only
+`AssetSonarRemoteAccessAgent.pkg` next to `AssetSonarRemoteAccessAgent.msh`. `--display-name` only
 sets the installer window title and is never used for the filename, so a
 title with a space in it cannot leak into the artifact name.
 
@@ -200,9 +200,9 @@ the `.pkg`, or it points at the wrong path):
 
 ```sh
 node packaging/macos/build-macos-pkg.js --emit-pppc-profile meshagent_osx-arm-64 \
-  --out dist/arm64 --company AssetSonar --service SonarSightAgent \
-  --exe SonarSightAgent --identifier com.assetsonar.sonarsight \
-  --display-name "Sonar Sight" --organization "Your Org Inc"
+  --out dist/arm64 --company AssetSonar --service AssetSonarRemoteAccessAgent \
+  --exe AssetSonarRemoteAccessAgent --identifier com.assetsonar.remoteaccess \
+  --display-name "AssetSonar Remote Access" --organization "Your Org Inc"
 ```
 
 `--skip-signature-check` also skips the profile, since there is no verified
@@ -216,12 +216,12 @@ Skip this if you already passed `--sign` in step 3.
 
 ```sh
 productsign --sign "Developer ID Installer: Your Org (TEAMID)" \
-  dist/arm64/SonarSightAgent.pkg dist/arm64/SonarSightAgent-signed.pkg
+  dist/arm64/AssetSonarRemoteAccessAgent.pkg dist/arm64/AssetSonarRemoteAccessAgent-signed.pkg
 productsign --sign "Developer ID Installer: Your Org (TEAMID)" \
-  dist/x86_64/SonarSightAgent.pkg dist/x86_64/SonarSightAgent-signed.pkg
+  dist/x86_64/AssetSonarRemoteAccessAgent.pkg dist/x86_64/AssetSonarRemoteAccessAgent-signed.pkg
 
-pkgutil --check-signature dist/arm64/SonarSightAgent-signed.pkg    # verify: "Status: signed..."
-pkgutil --check-signature dist/x86_64/SonarSightAgent-signed.pkg
+pkgutil --check-signature dist/arm64/AssetSonarRemoteAccessAgent-signed.pkg    # verify: "Status: signed..."
+pkgutil --check-signature dist/x86_64/AssetSonarRemoteAccessAgent-signed.pkg
 ```
 
 ## 5. Notarize + staple each
@@ -236,17 +236,17 @@ xcrun notarytool store-credentials "AC_PROFILE" \
 Per release:
 
 ```sh
-xcrun notarytool submit dist/arm64/SonarSightAgent-signed.pkg --keychain-profile "AC_PROFILE" --wait
-xcrun stapler staple dist/arm64/SonarSightAgent-signed.pkg
+xcrun notarytool submit dist/arm64/AssetSonarRemoteAccessAgent-signed.pkg --keychain-profile "AC_PROFILE" --wait
+xcrun stapler staple dist/arm64/AssetSonarRemoteAccessAgent-signed.pkg
 
-xcrun notarytool submit dist/x86_64/SonarSightAgent-signed.pkg --keychain-profile "AC_PROFILE" --wait
-xcrun stapler staple dist/x86_64/SonarSightAgent-signed.pkg
+xcrun notarytool submit dist/x86_64/AssetSonarRemoteAccessAgent-signed.pkg --keychain-profile "AC_PROFILE" --wait
+xcrun stapler staple dist/x86_64/AssetSonarRemoteAccessAgent-signed.pkg
 
-spctl -a -vv -t install dist/arm64/SonarSightAgent-signed.pkg      # verify: "accepted"
-spctl -a -vv -t install dist/x86_64/SonarSightAgent-signed.pkg
+spctl -a -vv -t install dist/arm64/AssetSonarRemoteAccessAgent-signed.pkg      # verify: "accepted"
+spctl -a -vv -t install dist/x86_64/AssetSonarRemoteAccessAgent-signed.pkg
 ```
 
-`dist/arm64/SonarSightAgent-signed.pkg` and `dist/x86_64/SonarSightAgent-signed.pkg`
+`dist/arm64/AssetSonarRemoteAccessAgent-signed.pkg` and `dist/x86_64/AssetSonarRemoteAccessAgent-signed.pkg`
 are now your two durable artifacts. Rebuild them only on a new MeshAgent
 release — never per tenant.
 
@@ -282,10 +282,10 @@ run it as often as you have tenants:
 ```sh
 node packaging/macos/build-macos-pkg.js --emit-provision-script acme.msh \
   --out out/acme \
-  --company AssetSonar --service SonarSightAgent --exe SonarSightAgent
+  --company AssetSonar --service AssetSonarRemoteAccessAgent --exe AssetSonarRemoteAccessAgent
 ```
 
-Produces `out/acme/SonarSightAgent-provision.sh`.
+Produces `out/acme/AssetSonarRemoteAccessAgent-provision.sh`.
 
 `--company`, `--service` and `--exe` **must match** the values the `.pkg`
 was built with, or the script will look in the wrong place and exit `2`.
@@ -300,13 +300,13 @@ One `.pkg` per architecture plus one script per tenant:
 
 ```sh
 mkdir -p out/acme
-cp dist/arm64/SonarSightAgent-signed.pkg   out/acme/SonarSightAgent-arm64.pkg
-cp dist/x86_64/SonarSightAgent-signed.pkg  out/acme/SonarSightAgent-x86_64.pkg
+cp dist/arm64/AssetSonarRemoteAccessAgent-signed.pkg   out/acme/AssetSonarRemoteAccessAgent-arm64.pkg
+cp dist/x86_64/AssetSonarRemoteAccessAgent-signed.pkg  out/acme/AssetSonarRemoteAccessAgent-x86_64.pkg
 cp dist/arm64/Uninstall.command            out/acme/Uninstall.command
-cp dist/arm64/SonarSightAgent-Uninstall-signed.pkg out/acme/SonarSightAgent-Uninstall.pkg
-cp dist/arm64/SonarSightAgent-PPPC.mobileconfig out/acme/SonarSightAgent-PPPC.mobileconfig
-cp acme.msh                                out/acme/SonarSightAgent.msh
-# plus out/acme/SonarSightAgent-provision.sh from step 7
+cp dist/arm64/AssetSonarRemoteAccessAgent-Uninstall-signed.pkg out/acme/AssetSonarRemoteAccessAgent-Uninstall.pkg
+cp dist/arm64/AssetSonarRemoteAccessAgent-PPPC.mobileconfig out/acme/AssetSonarRemoteAccessAgent-PPPC.mobileconfig
+cp acme.msh                                out/acme/AssetSonarRemoteAccessAgent.msh
+# plus out/acme/AssetSonarRemoteAccessAgent-provision.sh from step 7
 ```
 
 Hand the folder over as a disk image, not a zip. Since macOS 10.15 an
@@ -317,7 +317,7 @@ under `/Volumes` the same pair works, and a double-click on the package
 configures and starts the agent:
 
 ```sh
-hdiutil create -volname SonarSight -srcfolder out/acme -format UDZO out/SonarSightAgent-acme.dmg
+hdiutil create -volname AssetSonarRemoteAccess -srcfolder out/acme -format UDZO out/AssetSonarRemoteAccessAgent-acme.dmg
 ```
 
 An ISO 9660 image wrapped in a UDIF container does as well, which is what
@@ -332,8 +332,8 @@ Jamf / Kandji / Intune / Mosyle / Munki steps and the exit-code table.
 
 ```sh
 uname -m                                              # pick the matching pkg
-sudo installer -pkg SonarSightAgent-arm64.pkg -target /   # agent installed, stopped
-sudo bash SonarSightAgent-provision.sh                # configures + starts it
+sudo installer -pkg AssetSonarRemoteAccessAgent-arm64.pkg -target /   # agent installed, stopped
+sudo bash AssetSonarRemoteAccessAgent-provision.sh                # configures + starts it
 echo "exit code: $?"                                  # 0 = success
 ```
 
@@ -350,14 +350,14 @@ what happened:
 
 It is idempotent: a second run with unchanged config restarts nothing and
 still exits `0`. Every run appends to
-`/var/log/SonarSightAgent-provision.log`.
+`/var/log/AssetSonarRemoteAccessAgent-provision.log`.
 
 Verify by hand:
 
 ```sh
-sudo launchctl print system/SonarSightAgent | grep -E 'state|pid'   # want "state = running"
-ls -la /usr/local/mesh_services/AssetSonar/SonarSightAgent/
-sudo cat /usr/local/mesh_services/AssetSonar/SonarSightAgent/SonarSightAgent.msh
+sudo launchctl print system/AssetSonarRemoteAccessAgent | grep -E 'state|pid'   # want "state = running"
+ls -la /usr/local/mesh_services/AssetSonar/AssetSonarRemoteAccessAgent/
+sudo cat /usr/local/mesh_services/AssetSonar/AssetSonarRemoteAccessAgent/AssetSonarRemoteAccessAgent.msh
 ```
 
 ### Where the postinstall looks for a configuration
@@ -395,7 +395,7 @@ sudo bash packaging/macos/purge-macos-agent.sh --yes       # MDM: no confirmatio
 
 It discovers every launchd job, process, binary, receipt, firewall rule and
 TCC grant (Full Disk Access, Screen Recording, Accessibility, Input
-Monitoring, ...) matching `meshagent|mesh_services|meshcentral|assetsonar|sonarsight`
+Monitoring, ...) matching `meshagent|mesh_services|meshcentral|assetsonar|sonarsight|remoteaccess`
 (add more with `--pattern`), prints the complete plan, removes exactly that
 after confirmation, then verifies and exits `0` only when nothing is left.
 

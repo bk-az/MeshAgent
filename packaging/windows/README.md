@@ -32,7 +32,7 @@ Trailer written at end-of-file, which the agent looks for:
 ```sh
 # One signed .exe per release  +  one .msh per tenant  ->  a ready-to-ship .exe
 node packaging/windows/embed-msh-windows.js \
-  MeshAgentSigned.exe  tenant.msh  dist/acme/SonarSightAgent.exe  --verify
+  MeshAgentSigned.exe  tenant.msh  dist/acme/AssetSonarRemoteAccessAgent.exe  --verify
 ```
 
 `--verify` re-reads the output and confirms the `.msh` round-trips and, for a
