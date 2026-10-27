@@ -44,9 +44,9 @@
 #   --no-syntax-check      Skip the "bash -n" check of the emitted script
 #
 # Example (matching the .pkg from mac-build-sign.md):
-#   ruby packaging/macos/emit_provision_script.rb ~/Downloads/SonarSight.msh \
-#     --out dist/arm64 --company AssetSonar --service SonarSightAgent \
-#     --exe SonarSightAgent
+#   ruby packaging/macos/emit_provision_script.rb ~/Downloads/AssetSonarRemoteAccess.msh \
+#     --out dist/arm64 --company AssetSonar --service AssetSonarRemoteAccessAgent \
+#     --exe AssetSonarRemoteAccessAgent
 
 require 'base64'
 
@@ -354,9 +354,9 @@ PROVISION_TEMPLATE
     4 agent did not start).
 
     Example:
-      ruby emit_provision_script.rb ~/Downloads/SonarSight.msh \\
-        --out dist/arm64 --company AssetSonar --service SonarSightAgent \\
-        --exe SonarSightAgent
+      ruby emit_provision_script.rb ~/Downloads/AssetSonarRemoteAccess.msh \\
+        --out dist/arm64 --company AssetSonar --service AssetSonarRemoteAccessAgent \\
+        --exe AssetSonarRemoteAccessAgent
   TXT
 
   def main(argv)
