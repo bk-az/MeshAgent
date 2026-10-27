@@ -395,7 +395,7 @@ sudo bash packaging/macos/purge-macos-agent.sh --yes       # MDM: no confirmatio
 
 It discovers every launchd job, process, binary, receipt, firewall rule and
 TCC grant (Full Disk Access, Screen Recording, Accessibility, Input
-Monitoring, ...) matching `meshagent|mesh_services|meshcentral|assetsonar|sonarsight|remoteaccess`
+Monitoring, ...) matching `meshagent|mesh_services|meshcentral|assetsonar|sonarsight`
 (add more with `--pattern`), prints the complete plan, removes exactly that
 after confirmation, then verifies and exits `0` only when nothing is left.
 
