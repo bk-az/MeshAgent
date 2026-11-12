@@ -53,3 +53,17 @@ git checkout master
 git reset --hard upstream/master
 git push --force-with-lease origin master
 ```
+
+## OpenSSL
+
+The agent links a vendored, statically built OpenSSL (currently 3.5.9 LTS). Headers live in
+`openssl/include/openssl`, libraries in `openssl/libstatic`. How to rebuild them, which
+Configure options are required, and the three small version-guarded source changes that
+keep the tree buildable against both OpenSSL 1.1.1 (upstream) and 3.x/4.x are documented
+in [openssl/BUILDING.md](openssl/BUILDING.md).
+
+```sh
+./openssl/libstatic/macos/build-openssl-macos.sh 3.5.9 --refresh-headers   # macOS libs + headers
+powershell -ExecutionPolicy Bypass -File openssl\libstatic\build-openssl-windows-all.ps1 -BuildAgent   # Windows x64/x86/ARM64 libs, on a VS 2022 machine
+./openssl/libstatic/build-openssl-static.sh x86-64                           # one Linux/BSD arch, run on that platform
+```

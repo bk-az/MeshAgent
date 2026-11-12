@@ -682,6 +682,104 @@ static pid_t ILibProcessPipe_ForkPTY_BSD(int *amaster, struct termios *termp, st
 #define forkpty(amaster, name, termp, winp) ILibProcessPipe_ForkPTY_BSD(amaster, termp, winp)
 #endif
 
+#ifdef WIN32
+// Windows environment variables a child needs even when the caller supplies an explicit
+// environment block. Without SystemRoot in particular, the legacy CryptAcquireContext() /
+// CryptGenRandom() entropy path -- used by OpenSSL static libraries built for _WIN32_WINNT
+// 0x0501, as ours were until 3a0265d -- fails because the CSP DLL path in the registry is
+// %SystemRoot%\system32\rsaenh.dll. That makes RAND_bytes() fail in the child and (before the
+// util_random() fallback) hung the agent. The current libraries target 0x0601 and seed through
+// BCryptGenRandom, which does not need the environment, so for them this is defence in depth
+// (and still what the agent's own code needs). The rest protect Winsock/side-by-side DLL loading,
+// child shell-outs (ComSpec) and temp-file creation. This full list is only for children that run
+// in the agent's own security context (CreateProcessW).
+static const char * const ILibProcessPipe_EssentialWinEnv[] = {
+	"SystemRoot", "SystemDrive", "windir", "ComSpec", "PATH", "PATHEXT",
+	"TEMP", "TMP", "ProgramData", "PUBLIC", "ALLUSERSPROFILE", "NUMBER_OF_PROCESSORS"
+};
+// Children started with a user token (CreateProcessAsUserW: USER, WINLOGON, TERM, SPECIFIED_USER)
+// run in another account's session. Only the machine-wide variables are safe to copy from the
+// agent, which runs as SYSTEM; PATH, TEMP, TMP and the rest belong to that user and must not be
+// replaced with SYSTEM's values (e.g. TEMP=C:\Windows\TEMP in a user's session).
+static const char * const ILibProcessPipe_EssentialWinEnv_UserToken[] = { "SystemRoot", "SystemDrive", "windir" };
+
+// Reads one environment variable of this process as UTF-8 (NULL if unset or empty). getenv() would
+// return the ANSI code page, which garbles non-ASCII values (e.g. C:\Users\Jürgen in TEMP) once the
+// block is converted with ILibUTF8ToWide*. Caller frees the result with ILibMemory_Free().
+static char* ILibProcessPipe_GetEnvUTF8(const char *key)
+{
+	WCHAR wkey[64], *wval;
+	char *val;
+	DWORD wlen;
+	int u8len;
+
+	ILibUTF8ToWideEx((char*)key, -1, wkey, (int)(sizeof(wkey) / sizeof(WCHAR)));
+	if ((wlen = GetEnvironmentVariableW(wkey, NULL, 0)) <= 1) { return(NULL); } // 0: not set, 1: empty
+	wval = (WCHAR*)ILibMemory_SmartAllocate(wlen * sizeof(WCHAR));
+	if (GetEnvironmentVariableW(wkey, wval, wlen) == 0 || (u8len = WideCharToMultiByte(CP_UTF8, 0, wval, -1, NULL, 0, NULL, NULL)) <= 1)
+	{
+		ILibMemory_Free(wval);
+		return(NULL);
+	}
+	val = (char*)ILibMemory_SmartAllocate(u8len);
+	WideCharToMultiByte(CP_UTF8, 0, wval, -1, val, u8len, NULL, NULL);
+	ILibMemory_Free(wval);
+	return(val);
+}
+
+// A child started with an explicit environment would otherwise lose the essential OS variables
+// above: CreateProcess* does NOT merge the parent's environment in when an explicit block is
+// supplied. Returns a new NULL-terminated key/value array with the missing variables appended,
+// or NULL if nothing needed adding (caller then keeps the original envvars). The caller releases
+// the result with ILibProcessPipe_FreeExtendedEnv().
+static void* ILibProcessPipe_ExtendEnv(void *envvars, ILibProcessPipe_SpawnTypes spawnType)
+{
+	int n = 0, i, e, count;
+	const char * const *keys;
+	char **src = (char**)envvars, **dst;
+	if (envvars == NULL) { return(NULL); } // Inherited environment already has everything.
+
+	if (spawnType != ILibProcessPipe_SpawnTypes_DEFAULT && spawnType != ILibProcessPipe_SpawnTypes_DETACHED)
+	{
+		keys = ILibProcessPipe_EssentialWinEnv_UserToken;
+		count = (int)(sizeof(ILibProcessPipe_EssentialWinEnv_UserToken) / sizeof(ILibProcessPipe_EssentialWinEnv_UserToken[0]));
+	}
+	else
+	{
+		keys = ILibProcessPipe_EssentialWinEnv;
+		count = (int)(sizeof(ILibProcessPipe_EssentialWinEnv) / sizeof(ILibProcessPipe_EssentialWinEnv[0]));
+	}
+
+	while (src[n] != NULL) { n += 2; }
+	// The extra int records where the appended (allocated) values start, for ILibProcessPipe_FreeExtendedEnv().
+	dst = (char**)ILibMemory_SmartAllocateEx((n + count * 2 + 1) * sizeof(char*), sizeof(int));
+	*((int*)ILibMemory_Extra(dst)) = n;
+	for (i = 0; i < n; ++i) { dst[i] = src[i]; }
+
+	// Append each essential variable that the caller did not already set and that exists in the
+	// parent's environment.
+	for (e = 0; e < count; ++e)
+	{
+		const char *key = keys[e];
+		char *val;
+		int present = 0, k;
+		for (k = 0; k < n; k += 2) { if (dst[k] != NULL && _stricmp(dst[k], key) == 0) { present = 1; break; } }
+		if (present != 0) { continue; }
+		if ((val = ILibProcessPipe_GetEnvUTF8(key)) == NULL) { continue; }
+		dst[i++] = (char*)key; dst[i++] = val;
+	}
+	if (i == n) { ILibMemory_Free(dst); return(NULL); } // Caller already set everything
+	dst[i] = NULL;
+	return(dst);
+}
+static void ILibProcessPipe_FreeExtendedEnv(void *extendedEnv)
+{
+	char **dst = (char**)extendedEnv;
+	int k;
+	for (k = *((int*)ILibMemory_Extra(dst)); dst[k] != NULL; k += 2) { ILibMemory_Free(dst[k + 1]); }
+	ILibMemory_Free(dst);
+}
+#endif
 ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_Manager pipeManager, char* target, char* const* parameters, ILibProcessPipe_SpawnTypes spawnType, void *sid, void *envvars, int extraMemorySize)
 {
 	ILibProcessPipe_Process_Object* retVal = NULL;
@@ -774,6 +872,8 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 		info.dwFlags |= STARTF_USESTDHANDLES;
 	}
 
+	void *extendedEnv = ILibProcessPipe_ExtendEnv(envvars, spawnType);
+	if (extendedEnv != NULL) { envvars = extendedEnv; }
 	if (envvars != NULL)
 	{
 		WCHAR *wideEnv;
@@ -798,6 +898,7 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 		}
 		envvars = wideEnv;
 	}
+	if (extendedEnv != NULL) { ILibProcessPipe_FreeExtendedEnv(extendedEnv); extendedEnv = NULL; }
 
 
 	if (((spawnType == ILibProcessPipe_SpawnTypes_DEFAULT || spawnType == ILibProcessPipe_SpawnTypes_DETACHED) && !CreateProcessW(ILibUTF8ToWideEx(target, -1, tmp1, (int)sizeof(tmp1)/2), ILibUTF8ToWideEx(parms, -1, tmp2, (int)sizeof(tmp2)/2), NULL, NULL, spawnType == ILibProcessPipe_SpawnTypes_DETACHED ? FALSE: TRUE, CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW | (needSetSid !=0? (DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP) : 0x00), envvars, NULL, &info, &processInfo)) ||

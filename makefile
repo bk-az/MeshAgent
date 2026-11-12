@@ -650,6 +650,12 @@ MACSSL = -Lopenssl/libstatic/macos/$(ARCHNAME)
 BSDSSL = -Lopenssl/libstatic/bsd/$(ARCHNAME)
 CFLAGS += -DMICROSTACK_TLS_DETECT
 LDEXTRA += -lssl -lcrypto
+# OpenSSL 3's RCU code uses 64-bit atomics that ARMv6 (ARCHID 25, Pi Zero/1) cannot inline, so
+# libcrypto references __atomic_*_8 from libatomic. Link it statically, after -lcrypto, so the
+# binary does not depend on libatomic.so.1 being installed on the Pi. 64-bit ARM and x86 inline them.
+ifeq ($(ARCHID),25)
+LDEXTRA += -l:libatomic.a
+endif
 endif
 
 ifeq ($(DYNAMICTLS),1)

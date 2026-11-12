@@ -309,12 +309,12 @@ the same naming flags.
 ```sh
 # Once per release, per architecture — then sign and notarize:
 node build-macos-pkg.js meshagent_osx-arm-64 dist/arm64 \
-  --company AssetSonar --service SonarSightAgent --exe SonarSightAgent \
-  --display-name "Sonar Sight" --version 1.2.3
+  --company AssetSonar --service AssetSonarRemoteAccessAgent --exe AssetSonarRemoteAccessAgent \
+  --display-name "AssetSonar Remote Access" --version 1.2.3
 
 # Once per customer — plain text, no certificates, no notarization:
 node build-macos-pkg.js --emit-provision-script tenant.msh --out dist/acme \
-  --company AssetSonar --service SonarSightAgent --exe SonarSightAgent
+  --company AssetSonar --service AssetSonarRemoteAccessAgent --exe AssetSonarRemoteAccessAgent
 ```
 
 `--company`, `--service` and `--exe` **must be identical** in both commands,

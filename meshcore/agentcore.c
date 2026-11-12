@@ -2379,9 +2379,13 @@ int agent_GenerateCertificates(MeshAgentHostContainer *agent, char* certfile)
 	return 0;
 }
 
+// agent_LoadCertificates() result when the stored node certificate exists but this OpenSSL build
+// cannot decrypt it (legacy provider missing). The caller must not regenerate the identity.
+#define AGENT_LOADCERTIFICATES_LEGACY_UNAVAILABLE 2
+
 int agent_LoadCertificates(MeshAgentHostContainer *agent)
 {
-	int len;
+	int len, p12 = 0;
 
 	SSL_TRACE1("agent_LoadCertificates()");
 
@@ -2389,7 +2393,18 @@ int agent_LoadCertificates(MeshAgentHostContainer *agent)
 
 	// First, look to see if we have a certificate in the .db file, if we do, use that.
 	len = ILibSimpleDataStore_Get(agent->masterDb, "SelfNodeCert", ILibScratchPad2, sizeof(ILibScratchPad2));
-	if (len == 0 || util_from_p12(ILibScratchPad2, len, "hidden", &(agent->selfcert)) == 0)
+	if (len != 0) { p12 = util_from_p12(ILibScratchPad2, len, "hidden", &(agent->selfcert)); }
+	if (p12 == UTIL_P12_LEGACY_UNAVAILABLE)
+	{
+		// The stored identity is a 1.1.x-era (RC2) PKCS#12 and this libcrypto cannot load the legacy provider.
+		// That is a build defect, not a bad identity: say so and keep the stored data instead of silently
+		// generating a new node identity, which would re-enroll this machine as a new device.
+		ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost | ILibRemoteLogging_Modules_ConsolePrint, ILibRemoteLogging_Flags_VerbosityLevel_1,
+			"agent_LoadCertificates(): stored node certificate needs the OpenSSL legacy provider, which this build cannot load; keeping the stored identity");
+		ILIBLOGMESSAGEX("Stored node certificate needs the OpenSSL legacy provider (RC2 PKCS#12), which this build cannot load. Keeping the stored identity; rebuild OpenSSL with the legacy provider (openssl/BUILDING.md).");
+		return(AGENT_LOADCERTIFICATES_LEGACY_UNAVAILABLE);
+	}
+	if (p12 <= 0)
 	{
 #if defined(WIN32)
 		char rootSubject[255];
@@ -2424,7 +2439,7 @@ int agent_LoadCertificates(MeshAgentHostContainer *agent)
 			{
 				// Load the TLS certificate from the database. If not present, generate one.
 				len = ILibSimpleDataStore_Get(agent->masterDb, "SelfNodeTlsCert", ILibScratchPad2, sizeof(ILibScratchPad2));
-				if ((len != 0) && (util_from_p12(ILibScratchPad2, len, "hidden", &(agent->selftlscert)) == 0)) { len = 0; } // Unable to decode this certificate
+				if ((len != 0) && (util_from_p12(ILibScratchPad2, len, "hidden", &(agent->selftlscert)) <= 0)) { len = 0; } // Unable to decode this certificate
 				if (agent_VerifyMeshCertificates(agent) != 0) 
 				{
 					// Check that the load TLS cert is signed by our root.
@@ -2479,7 +2494,7 @@ int agent_LoadCertificates(MeshAgentHostContainer *agent)
 	if (len != 0)
 	{
 		// If the TLS certificate is in the database, load it. If not, it's ok to skip this.
-		if (util_from_p12(ILibScratchPad2, len, "hidden", &(agent->selftlscert)) == 0) {
+		if (util_from_p12(ILibScratchPad2, len, "hidden", &(agent->selftlscert)) <= 0) {
 			ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "...Failed to load TLS Certificate from Database");
 			util_freecert(&(agent->selfcert));
 			SSL_TRACE2("agent_LoadCertificates([ERROR: SelfNodeTlsCert])");
@@ -5368,7 +5383,17 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 	Duktape_SafeDestroyHeap(tmpCtx);
 
 	// Load the mesh agent certificates
-	if ((resetNodeId == 1 || agent_LoadCertificates(agentHost) != 0) && agent_GenerateCertificates(agentHost, NULL) != 0) { printf("Certificate error\r\n"); }
+	int certStatus = (resetNodeId == 1) ? 1 : agent_LoadCertificates(agentHost);
+	if (certStatus == AGENT_LOADCERTIFICATES_LEGACY_UNAVAILABLE)
+	{
+		// The stored identity is unreadable only because this OpenSSL build lacks the legacy provider. Stop here
+		// (same as an unopenable database) rather than generate a new identity: that would re-enroll the node as a
+		// new device, and the stored one becomes readable again as soon as a correctly built agent is installed.
+		printf("Stored node certificate cannot be decrypted by this OpenSSL build (legacy provider missing); not starting, to keep the node identity.\r\n");
+		agentHost->exitCode = 1;
+		return 0;
+	}
+	if (certStatus != 0 && agent_GenerateCertificates(agentHost, NULL) != 0) { printf("Certificate error\r\n"); }
 	if (agent_VerifyMeshCertificates(agentHost) != 0) { printf("Certificate validation error\r\n"); }
 #else
 	printf("TLS support disabled\n");

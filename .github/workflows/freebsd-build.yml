@@ -1,10 +1,12 @@
 name: FreeBSD Build
 run-name: Build FreeBSD versions of MeshAgent
+# FreeBSD is not supported for now: the OpenSSL libraries under openssl/libstatic/bsd are still
+# 1.1.1s and do not link against the vendored 3.5.9 headers, so this build fails at link time.
+# It is kept runnable by hand so it can be re-enabled (restore the push / pull_request /
+# workflow_call triggers, add the freebsd job back to release.yml and the binary to
+# release-files.json) once the BSD libraries are rebuilt, see openssl/BUILDING.md.
 on:
-  push:
-    branches: ['**']
-  pull_request:
-  workflow_call:
+  workflow_dispatch:
 permissions:
   contents: read
 
