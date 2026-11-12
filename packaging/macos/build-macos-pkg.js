@@ -193,7 +193,7 @@ async function verifyAgentSignature(agentPath) {
             + archs.map(function (a) { return '  ' + a + ': ' + slices[a].identifier; }).join('\n') + '\n'
             + 'TCC evaluates the stored requirement against every slice, so this binary will be denied Screen\n'
             + 'Recording / Accessibility and lose Full Disk Access on every Mac. Re-sign both thin binaries with\n'
-            + 'the SAME --identifier (e.g. com.assetsonar.sonarsight.agent), lipo again, then rerun.');
+            + 'the SAME --identifier (e.g. com.assetsonar.remoteaccess.agent), lipo again, then rerun.');
     }
     const warnings = [];
     if (archs.some(function (a) { return slices[a].adhoc; })) {
@@ -1167,10 +1167,10 @@ function printHelp() {
         '',
         'The resulting .pkg contains NO tenant .msh and never fails for a missing',
         'one. Deploy the package, then run the provisioning script as root:',
-        '  dist/SonarSightAgent.pkg                <- signed + notarized once per release',
-        '  dist/SonarSightAgent-Uninstall.pkg      <- signed + notarized once per release',
-        '  dist/SonarSightAgent-PPPC.mobileconfig  <- per release, deploy via MDM',
-        '  dist/SonarSightAgent-provision.sh       <- per tenant, plain text, no signing',
+        '  dist/AssetSonarRemoteAccessAgent.pkg                <- signed + notarized once per release',
+        '  dist/AssetSonarRemoteAccessAgent-Uninstall.pkg      <- signed + notarized once per release',
+        '  dist/AssetSonarRemoteAccessAgent-PPPC.mobileconfig  <- per release, deploy via MDM',
+        '  dist/AssetSonarRemoteAccessAgent-provision.sh       <- per tenant, plain text, no signing',
         'See MASS-DEPLOYMENT.md for Jamf / Kandji / Intune / Mosyle / Munki steps.',
         '',
         'Requires macOS with Xcode Command Line Tools (pkgbuild, productbuild).'
